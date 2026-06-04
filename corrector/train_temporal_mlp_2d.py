@@ -1,0 +1,438 @@
+"""Trainer for TemporalMLPWith2D: temporal_mlp + current-frame 2D inputs.
+
+Per session:
+  - 3D pose window from load_paired_world (SLEAP timeline; same source the
+    temporal_mlp trainer uses, with linear-interpolated 3D filling dropped
+    video frames).
+  - Current-frame 2D + confidence + visibility from load_session_2d, joined
+    to the SLEAP timeline via cam0_frame.
+
+Training windows are indexed by SLEAP timeline t. We require that frame t has a
+matching processed_frame (cam0_frame -> processed_frame map). The first ctx-1
+frames of each session are skipped (no full window available yet).
+
+Procrustes is fit on (sl, dn) from load_paired_world, like temporal_mlp — this
+matches the inference pipeline for the 3D-input correctors.
+
+Noise augmentation: with prob noise_prob per sample, add N(0, noise_std_mm) to
+the input pose window (target stays clean). Teaches the model to recover from
+large triangulation errors at inference time.
+
+Usage:
+    python -m corrector.train_temporal_mlp_2d --rats R1 R2 R3 \\
+        --tag R1R2R3_temporal_mlp_2d_v1 --ctx 5 --epochs 100 \\
+        --early_stop_patience 20 --noise_std_mm 50 --noise_prob 0.3
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+
+_THIS = Path(__file__).resolve()
+sys.path.insert(0, str(_THIS.parent.parent))
+sys.path.insert(0, str(_THIS.parent.parent / "experiments"))
+
+from config import EDGES
+
+from corrector.data_world import (session_split_multi, SLEAP_HZ,
+                                    load_paired_world)
+from corrector.data_world_2d_from_saved import load_session_2d
+from corrector.models import build_model
+from corrector.world_alignment import calibration_indices, fit_procrustes
+
+CKPT_DIR = _THIS.parent / "checkpoints"
+CKPT_DIR.mkdir(exist_ok=True)
+
+VIDEO_W = 1920.0
+VIDEO_H = 1200.0
+N_CAM = 3
+N_KP = 23
+
+# Drop training samples where the per-sample max |aligned 3D| or |target|
+# exceeds this many mm. Inference applies the same guard (see evaluate_all).
+OUTLIER_THRESHOLD_MM = 1000.0
+RESIDUAL_CLIP_MM = 200.0
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
+class TemporalMLP2DDataset(Dataset):
+    """Per-session arrays + (session_idx, sleap_t) flat index.
+
+    Stores, per kept session:
+      sl_aligned : (T_sleap, 23, 3) — Procrustes-aligned SLEAP 3D in DANNCE space
+      dn         : (T_sleap, 23, 3) — DANNCE 3D, median-25 filtered
+      x_2d_per_t : (T_sleap, 3, 23, 2)  — current-frame 2D for SLEAP timeline.
+                                            NaN/sentinel for frames without a
+                                            processed_frame mapping. Channels
+                                            are zeroed before training when
+                                            visibility is 0.
+      x_conf_per_t: (T_sleap, 3, 23)
+      vis_per_t : (T_sleap, 3, 23) — 1/0 per cam per kp; zeros also mean the
+                                       per-frame mapping is missing entirely.
+      has_2d     : (T_sleap,) bool — whether this SLEAP frame has any 2D info
+                                       at all (i.e., is a processed frame).
+
+    A training sample is (session, sleap_t) with t >= ctx-1, has_2d[t] True,
+    and the window x_aligned[t-ctx+1 : t+1] containing no outlier-3D frames.
+    """
+
+    def __init__(self, rat_to_sessions: dict[str, list[str]], ctx: int,
+                 calibration_minutes: float = 5.0,
+                 calibration_n_sample: int = 1000,
+                 max_residual: float = 60.0,
+                 max_sessions_per_rat: int | None = None,
+                 verbose: bool = True):
+        self.ctx = ctx
+        self.sessions = []
+        self.session_residuals = []
+        for rat, sess_list in rat_to_sessions.items():
+            kept_for_rat = 0
+            for s in sess_list:
+                if (max_sessions_per_rat is not None
+                        and kept_for_rat >= max_sessions_per_rat):
+                    break
+                try:
+                    sl, dn = load_paired_world(rat, s)
+                except Exception as e:
+                    if verbose:
+                        print(f"  skip {rat}/{s}: load_paired_world failed: {e}",
+                              flush=True)
+                    continue
+                T_sleap = len(sl)
+                if T_sleap < max(1000, ctx * 5):
+                    if verbose:
+                        print(f"  skip {rat}/{s}: T_sleap={T_sleap} too small",
+                              flush=True)
+                    continue
+                try:
+                    sd = load_session_2d(rat, s, smooth_dannce=True)
+                except Exception as e:
+                    if verbose:
+                        print(f"  skip {rat}/{s}: load_session_2d failed: {e}",
+                              flush=True)
+                    continue
+                if len(sd.x_2d) < 100:
+                    if verbose:
+                        print(f"  skip {rat}/{s}: too few processed frames",
+                              flush=True)
+                    continue
+                # Procrustes on (sl, dn) — same as temporal_mlp's inference.
+                idx = calibration_indices(T_sleap, calibration_minutes, SLEAP_HZ,
+                                          calibration_n_sample, seed=0)
+                if len(idx) < 100:
+                    if verbose:
+                        print(f"  skip {rat}/{s}: no cal window", flush=True)
+                    continue
+                tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+                self.session_residuals.append((rat, s, float(tx["residual"])))
+                if tx["residual"] > max_residual:
+                    if verbose:
+                        print(f"  skip {rat}/{s}: residual={tx['residual']:.1f} "
+                              f"> {max_residual}", flush=True)
+                    continue
+
+                sl_aligned = tx["apply"](sl).astype(np.float32)     # (T_sleap, 23, 3)
+                dn32 = dn.astype(np.float32)
+
+                # Build a per-SLEAP-frame 2D bundle by scattering from saved
+                # processed-frame arrays via cam0_frame.
+                x_2d_per_t = np.zeros((T_sleap, N_CAM, N_KP, 2), dtype=np.float32)
+                x_conf_per_t = np.zeros((T_sleap, N_CAM, N_KP), dtype=np.float32)
+                vis_per_t = np.zeros((T_sleap, N_CAM, N_KP), dtype=np.float32)
+                has_2d = np.zeros(T_sleap, dtype=bool)
+                cam0 = sd.cam_frames[:, 0].astype(int)
+                in_range = (cam0 >= 0) & (cam0 < T_sleap)
+                rows = cam0[in_range]
+                # Per-frame visibility: detection finite AND conf > 0.
+                fr_2d = sd.x_2d[in_range]                            # (P', 3, 23, 2)
+                fr_conf = sd.x_conf[in_range]                        # (P', 3, 23)
+                fr_finite = np.isfinite(fr_2d).all(axis=-1)          # (P', 3, 23)
+                fr_vis = (fr_conf > 0) & fr_finite                   # bool
+                fr_2d_safe = np.where(fr_vis[..., None], fr_2d, 0.0).astype(np.float32)
+                fr_conf_safe = np.where(fr_vis, fr_conf, 0.0).astype(np.float32)
+                x_2d_per_t[rows] = fr_2d_safe
+                x_conf_per_t[rows] = fr_conf_safe
+                vis_per_t[rows] = fr_vis.astype(np.float32)
+                has_2d[rows] = True
+
+                # Normalize 2D pixel coords to [-1, 1].
+                scale = np.array([VIDEO_W, VIDEO_H], dtype=np.float32).reshape(1, 1, 1, 2)
+                x_2d_per_t = (x_2d_per_t / scale - 0.5) * 2.0
+
+                self.sessions.append({
+                    "rat": rat, "session": s,
+                    "sl_aligned": sl_aligned,
+                    "dn": dn32,
+                    "x_2d": x_2d_per_t,
+                    "x_conf": x_conf_per_t,
+                    "vis": vis_per_t,
+                    "has_2d": has_2d,
+                    "residual": float(tx["residual"]),
+                })
+                kept_for_rat += 1
+                if verbose:
+                    print(f"  loaded {rat}/{s}: T_sleap={T_sleap}  "
+                          f"has_2d={has_2d.sum()}  "
+                          f"resid={tx['residual']:.1f}", flush=True)
+
+        # Flat (session_idx, t) index. Requirements:
+        #   t >= ctx-1
+        #   has_2d[t] True
+        #   every frame in window [t-ctx+1 .. t] is finite + inlier on 3D
+        self._index = []
+        for si, sess in enumerate(self.sessions):
+            sl_a = sess["sl_aligned"]
+            dn = sess["dn"]
+            has_2d = sess["has_2d"]
+            T = len(sl_a)
+            # Per-frame inlier mask: finite + within OUTLIER_THRESHOLD_MM
+            flat = sl_a.reshape(T, -1)
+            flat_dn = dn.reshape(T, -1)
+            finite = np.isfinite(flat).all(axis=1) & np.isfinite(flat_dn).all(axis=1)
+            max_abs = np.where(finite, np.abs(flat).max(axis=1), np.inf)
+            max_abs_dn = np.where(finite, np.abs(flat_dn).max(axis=1), np.inf)
+            inlier_t = finite & (max_abs < OUTLIER_THRESHOLD_MM) \
+                              & (max_abs_dn < OUTLIER_THRESHOLD_MM)
+            # Cumulative-sum trick to test "all of window is inlier" in O(1) per t.
+            cs = np.concatenate([[0], np.cumsum(inlier_t.astype(np.int32))])
+            for t in range(ctx - 1, T):
+                if not has_2d[t]:
+                    continue
+                n_inlier_in_window = cs[t + 1] - cs[t + 1 - ctx]
+                if n_inlier_in_window < ctx:
+                    continue
+                self._index.append((si, t))
+        if verbose:
+            print(f"TemporalMLP2DDataset: {len(self.sessions)} sessions, "
+                  f"{len(self._index):,} windows  (ctx={ctx})", flush=True)
+
+    def __len__(self):
+        return len(self._index)
+
+    def __getitem__(self, idx):
+        si, t = self._index[idx]
+        sess = self.sessions[si]
+        ctx = self.ctx
+        return {
+            "x_pose": sess["sl_aligned"][t - ctx + 1 : t + 1],   # (ctx, 23, 3)
+            "x_2d":   sess["x_2d"][t],                           # (3, 23, 2)
+            "x_conf": sess["x_conf"][t],                         # (3, 23)
+            "x_vis":  sess["vis"][t],                            # (3, 23)
+            "y":      sess["dn"][t],                             # (23, 3)
+        }
+
+
+def collate(batch: list[dict]) -> dict:
+    out = {}
+    for k in ("x_pose", "x_2d", "x_conf", "x_vis", "y"):
+        out[k] = torch.from_numpy(np.stack([b[k] for b in batch]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------------
+
+def bone_length_loss(pred, target, edges):
+    e = torch.as_tensor(edges, dtype=torch.long, device=pred.device)
+    pred_d = (pred[:, e[:, 0], :] - pred[:, e[:, 1], :]).norm(dim=-1)
+    tgt_d = (target[:, e[:, 0], :] - target[:, e[:, 1], :]).norm(dim=-1)
+    return ((pred_d - tgt_d) ** 2).mean()
+
+
+# ---------------------------------------------------------------------------
+# Training utilities
+# ---------------------------------------------------------------------------
+
+def _apply_inference_guard(pred, x_pose_last):
+    """Per-sample outlier guard + residual clip, matching evaluate_all."""
+    finite_in = torch.isfinite(x_pose_last).reshape(x_pose_last.shape[0], -1).all(dim=-1)
+    max_abs = x_pose_last.reshape(x_pose_last.shape[0], -1).abs().max(dim=-1).values
+    inlier = finite_in & (max_abs < OUTLIER_THRESHOLD_MM)
+    delta = (pred - x_pose_last).clamp(min=-RESIDUAL_CLIP_MM, max=RESIDUAL_CLIP_MM)
+    clipped = x_pose_last + delta
+    return torch.where(inlier.view(-1, 1, 1), clipped, x_pose_last)
+
+
+def evaluate(model, loader, device):
+    model.eval()
+    sse, n = 0.0, 0
+    with torch.no_grad():
+        for batch in loader:
+            x_pose = batch["x_pose"].to(device, non_blocking=True)
+            x_2d = batch["x_2d"].to(device, non_blocking=True)
+            x_conf = batch["x_conf"].to(device, non_blocking=True)
+            x_vis = batch["x_vis"].to(device, non_blocking=True)
+            y = batch["y"].to(device, non_blocking=True)
+            pred = model(x_pose, x_2d, x_conf, x_vis)
+            guarded = _apply_inference_guard(pred, x_pose[:, -1, :, :])
+            sse += ((guarded - y) ** 2).sum().item()
+            n += y.numel()
+    return sse / max(n, 1)
+
+
+def make_loader(ds, batch_size, shuffle):
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                      num_workers=0, pin_memory=True, collate_fn=collate)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rats", nargs="+", required=True, choices=["R1", "R2", "R3"])
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--ctx", type=int, default=5)
+    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--n_hidden_layers", type=int, default=2)
+    ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--batch_size", type=int, default=2048)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--weight_decay", type=float, default=1e-5)
+    ap.add_argument("--bone_weight", type=float, default=0.05)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--max_residual", type=float, default=60.0)
+    ap.add_argument("--max_sessions_per_rat", type=int, default=None)
+    ap.add_argument("--early_stop_patience", type=int, default=20)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--noise_std_mm", type=float, default=50.0,
+                    help="stddev (mm) of input noise added to the pose window. "
+                         "Target stays clean.")
+    ap.add_argument("--noise_prob", type=float, default=0.3,
+                    help="per-sample probability of applying input noise this "
+                         "epoch.")
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed); np.random.seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    splits = session_split_multi(args.rats, seed=args.seed)
+    print("Split sizes:")
+    for which in ("train", "val", "test"):
+        print(f"  {which}: " + str({r: len(splits[which][r]) for r in args.rats}),
+              flush=True)
+
+    print("\nLoading train sessions...", flush=True)
+    train_ds = TemporalMLP2DDataset(
+        splits["train"], ctx=args.ctx,
+        max_residual=args.max_residual,
+        max_sessions_per_rat=args.max_sessions_per_rat)
+    print("\nLoading val sessions...", flush=True)
+    val_ds = TemporalMLP2DDataset(
+        splits["val"], ctx=args.ctx,
+        max_residual=args.max_residual,
+        max_sessions_per_rat=args.max_sessions_per_rat)
+
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise RuntimeError(f"Empty dataset: train={len(train_ds)} val={len(val_ds)}")
+
+    train_loader = make_loader(train_ds, args.batch_size, shuffle=True)
+    val_loader = make_loader(val_ds, args.batch_size, shuffle=False)
+
+    model = build_model("temporal_mlp_2d", ctx=args.ctx, hidden=args.hidden,
+                        n_hidden_layers=args.n_hidden_layers,
+                        dropout=args.dropout).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"\nmodel: temporal_mlp_2d  params: {n_params:,}  device: {device}",
+          flush=True)
+    print(f"input dim: {model.in_dim}  (pose={args.ctx*N_KP*3}, "
+          f"2D={N_CAM*N_KP*2}, conf={N_CAM*N_KP}, vis={N_CAM*N_KP})",
+          flush=True)
+
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,
+                            weight_decay=args.weight_decay)
+
+    best_val = float("inf"); best_state = None; history = []
+    epochs_no_improve = 0
+    for epoch in range(args.epochs):
+        model.train()
+        t0 = time.time()
+        train_sse, train_n = 0.0, 0
+        for batch in train_loader:
+            x_pose = batch["x_pose"].to(device, non_blocking=True)
+            x_2d = batch["x_2d"].to(device, non_blocking=True)
+            x_conf = batch["x_conf"].to(device, non_blocking=True)
+            x_vis = batch["x_vis"].to(device, non_blocking=True)
+            y = batch["y"].to(device, non_blocking=True)
+
+            # Input noise augmentation. Only on the pose window.
+            if args.noise_std_mm > 0 and args.noise_prob > 0:
+                B = x_pose.shape[0]
+                mask = (torch.rand(B, device=device) < args.noise_prob)
+                if mask.any():
+                    noise = torch.randn_like(x_pose) * args.noise_std_mm
+                    noise = noise * mask.view(-1, 1, 1, 1).to(x_pose.dtype)
+                    x_pose = x_pose + noise
+
+            pred = model(x_pose, x_2d, x_conf, x_vis)
+            loss_mse = ((pred - y) ** 2).mean()
+            loss = loss_mse
+            if args.bone_weight > 0:
+                loss = loss + args.bone_weight * bone_length_loss(pred, y, EDGES)
+
+            opt.zero_grad(); loss.backward()
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                 max_norm=args.grad_clip)
+            opt.step()
+            train_sse += ((pred.detach() - y) ** 2).sum().item()
+            train_n += y.numel()
+        train_mse = train_sse / max(train_n, 1)
+        val_mse = evaluate(model, val_loader, device)
+        elapsed = time.time() - t0
+        history.append({"epoch": epoch, "train_mse": train_mse,
+                        "val_mse": val_mse, "elapsed_s": elapsed})
+        print(f"epoch {epoch:3d}  train_mse={train_mse:.3f}  "
+              f"val_mse={val_mse:.3f}  ({elapsed:.1f}s)", flush=True)
+        if val_mse < best_val - 1e-4:
+            best_val = val_mse
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= args.early_stop_patience:
+                print(f"early stop at epoch {epoch}", flush=True)
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    ckpt = CKPT_DIR / f"{args.tag}.pt"
+    save = {
+        "model_name": "temporal_mlp_2d",
+        "ctx": args.ctx,
+        "hidden": args.hidden,
+        "n_hidden_layers": args.n_hidden_layers,
+        "dropout": args.dropout,
+        "weight_decay": args.weight_decay,
+        "rats": args.rats, "tag": args.tag,
+        "state_dict": best_state if best_state is not None else model.state_dict(),
+        "best_val_mse": best_val, "history": history,
+        "splits": splits,
+        "max_residual": args.max_residual,
+        "bone_weight": args.bone_weight,
+        "grad_clip": args.grad_clip,
+        "outlier_threshold_mm": OUTLIER_THRESHOLD_MM,
+        "residual_clip_mm": RESIDUAL_CLIP_MM,
+        "session_residuals_train": train_ds.session_residuals,
+        "session_residuals_val": val_ds.session_residuals,
+        "lr": args.lr,
+        "noise_std_mm": args.noise_std_mm,
+        "noise_prob": args.noise_prob,
+        "video_w": VIDEO_W, "video_h": VIDEO_H,
+    }
+    torch.save(save, ckpt)
+    print(f"\nsaved {ckpt}  best_val_mse={best_val:.3f}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

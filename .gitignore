@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Data / outputs (large files — kept locally, not pushed)
+scratch/
+results/
+logs/
+data/
+videos/
+figures/
+
+# Model checkpoints / weights
+*.pt
+*.pth
+
+# Large binary data formats
+*.npy
+*.npz
+*.mat
+
+# Media
+*.mp4
+*.png
