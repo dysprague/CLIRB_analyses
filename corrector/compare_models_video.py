@@ -42,7 +42,8 @@ from scipy.ndimage import median_filter
 _THIS = Path(__file__).resolve()
 sys.path.insert(0, str(_THIS.parent.parent))
 
-from config import EDGES, N_KEYPOINTS, sleap_path, calibration_path  # noqa: E402
+from config import (EDGES, N_KEYPOINTS, sleap_video_path,  # noqa: E402
+                    calibration_path)
 from data_io import load_sleap_dannce_keys, load_aligned_data  # noqa: E402
 from projection import project_3d_to_2d_for_camera  # noqa: E402
 from qc_utils import find_sleap_dannce_alignment  # noqa: E402
@@ -59,6 +60,19 @@ OUT_DIR = _THIS.parent / "videos"
 SLEAP_MEDFILT = 11
 DANNCE_MEDFILT = 25
 
+
+def _enable_gpu_memory_growth():
+    """Let TF grow GPU memory on demand instead of pre-grabbing the whole card.
+    The desktop GPU shares ~12 GB with Xorg; without this, TF reserves nearly
+    all free VRAM up front and a 600x960 forward pass can still OOM. Must be
+    called before any TF op."""
+    try:
+        import tensorflow as tf
+        for g in tf.config.list_physical_devices("GPU"):
+            tf.config.experimental.set_memory_growth(g, True)
+    except Exception as e:  # non-fatal: CPU fallback still works
+        print(f"  (could not set GPU memory growth: {e})", flush=True)
+
 DEFAULT_OLD_MODEL = ("/home/yutaka-sprague/olveczky_lab/Lab/CLIRB/models/"
                      "250731_105225.single_instance.n=10383.og")
 
@@ -69,29 +83,13 @@ CONFMAP_HEAD = "SingleInstanceConfmapsHead"
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-def run_sleap_inference(model_dir: str, pre: np.ndarray, n_frames: int,
-                        n_cams: int, calib: dict,
-                        peak_threshold: float = 0.01,
-                        batch: int = 30) -> np.ndarray:
-    """Run one SLEAP model over already-preprocessed frames and triangulate.
+def _infer_2d_peaks(model: "SleapModel", pre: np.ndarray, n_chunk_frames: int,
+                    n_cams: int, peak_threshold: float, batch: int):
+    """Forward pass + peak finding for one already-preprocessed frame chunk.
 
-    pre : (n_frames * n_cams, 600, 960, 3) float32 in [0, 1] -- output of
-          preprocess_for_sleap, shared across both models so frames are read
-          and resized only once.
-    batch : images per forward pass. 600x960 confmaps are memory-heavy, so the
-          full set is chunked to stay within GPU memory (the desktop GPU shares
-          VRAM with Xorg). Peak-finding/triangulation run on the full array.
-
-    Returns (n_frames, 23, 3) world-space 3D keypoints (SLEAP space).
-    The TF model is loaded and released inside this call to keep only one
-    model resident on the GPU at a time.
+    pre : (n_chunk_frames * n_cams, 600, 960, 3) float32 in [0, 1]
+    Returns (n_chunk_frames, n_cams, 23, 3) full-res px peaks (x, y, conf).
     """
-    t0 = time.perf_counter()
-    model = SleapModel(model_dir)
-    print(f"    loaded {Path(model_dir).name} ({time.perf_counter() - t0:.1f}s)",
-          flush=True)
-
-    t0 = time.perf_counter()
     cm_chunks = []
     for i in range(0, len(pre), batch):
         out = model.predict(pre[i:i + batch])[CONFMAP_HEAD]
@@ -99,19 +97,75 @@ def run_sleap_inference(model_dir: str, pre: np.ndarray, n_frames: int,
             out = np.transpose(out, (0, 3, 1, 2))
         cm_chunks.append(out)
     cm = np.concatenate(cm_chunks, axis=0)
-    print(f"    forward pass: {time.perf_counter() - t0:.1f}s "
-          f"({pre.shape[0]} images, batch={batch})", flush=True)
-
     pk, vals = find_peaks_from_confmaps(cm, threshold=peak_threshold)
     peaks_full = postprocess_peaks(pk, vals)
-    peaks_full = peaks_full.reshape(n_frames, n_cams, N_KEYPOINTS, 3)
-    clean = preprocess_2d_behavior(peaks_full)
-    pts3d = triangulate_session(clean[..., :2], calib).astype(np.float32)
+    return peaks_full.reshape(n_chunk_frames, n_cams, N_KEYPOINTS, 3)
 
-    # Release the model + TF graph before the next one loads.
-    del model, cm_chunks, cm
+
+def _preprocess_on_cpu(frames):
+    """Run preprocess_for_sleap (tf.image.resize + /255) on CPU so it doesn't
+    contend with the model for GPU memory. Resizing 450 1200x1920 images on the
+    GPU allocates large intermediates and OOMs the shared desktop card; on CPU
+    it's cheap and frees VRAM for the forward pass."""
+    import tensorflow as tf
+    with tf.device("/CPU:0"):
+        return preprocess_for_sleap(frames)
+
+
+def _infer_one_model_streaming(model_dir: str, rat: str, session: str,
+                               per_cam: np.ndarray, calib: dict,
+                               peak_threshold: float, batch: int,
+                               chunk_frames: int, label: str):
+    """Run ONE model over the whole session in RAM-bounded chunks.
+
+    Reads/preprocesses chunk_frames frames at a time, runs the forward pass,
+    accumulates only the tiny (T, n_cams, 23, 3) 2D peaks, then frees the frame
+    buffers. The model is loaded once and released at the end, so only one
+    model is resident on the GPU at a time (the desktop GPU shares ~12 GB with
+    Xorg). Returns (T, 23, 3) float32 SLEAP-world keypoints.
+    """
+    t0 = time.perf_counter()
+    model = SleapModel(model_dir)
+    n_total, n_cams = per_cam.shape
+    peaks = np.empty((n_total, n_cams, N_KEYPOINTS, 3), dtype=np.float32)
+    for c0 in range(0, n_total, chunk_frames):
+        c1 = min(c0 + chunk_frames, n_total)
+        frames = read_session_frames_per_cam(rat, session, per_cam[c0:c1])
+        pre = _preprocess_on_cpu(frames)  # (chunk*n_cams, 600, 960, 3)
+        del frames
+        peaks[c0:c1] = _infer_2d_peaks(model, pre, c1 - c0, n_cams,
+                                       peak_threshold, batch)
+        del pre
+        gc.collect()
+        print(f"    [{label}] frames {c0}-{c1} "
+              f"({time.perf_counter() - t0:.1f}s)", flush=True)
+    del model
     gc.collect()
-    return pts3d
+    clean = preprocess_2d_behavior(peaks)
+    return triangulate_session(clean[..., :2], calib).astype(np.float32)
+
+
+def run_inference_streaming(new_model: str, old_model: str, rat: str,
+                            session: str, per_cam: np.ndarray, calib: dict,
+                            peak_threshold: float = 0.01, batch: int = 30,
+                            chunk_frames: int = 200):
+    """Stream both models over the session, one model fully then the other.
+
+    A full-session frame buffer would be ~20 GB raw + ~20 GB preprocessed for
+    1000 frames x 3 cams at 1200x1920 (system OOM); both models resident at
+    once overflows the ~8.5 GB free VRAM (GPU OOM). So we process the new model
+    end-to-end in chunks, release it, then the old model. Frames are read twice
+    total (once per model) -- the trade for bounded RAM *and* VRAM.
+
+    Returns (new_3d, old_3d), each (T, 23, 3) float32 SLEAP-world keypoints.
+    """
+    new_3d = _infer_one_model_streaming(
+        new_model, rat, session, per_cam, calib, peak_threshold, batch,
+        chunk_frames, label="new")
+    old_3d = _infer_one_model_streaming(
+        old_model, rat, session, per_cam, calib, peak_threshold, batch,
+        chunk_frames, label="old")
+    return new_3d, old_3d
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +258,8 @@ def report_residuals(new_sleap_3d, old_sleap_3d, dannce_in_dannce, alignment):
 def render(new_model: str, old_model: str, rat: str, session: str,
            start_frame: int, n_frames: int, camera: int, fps: int = 20,
            peak_threshold: float = 0.01, out_subdir_name: str | None = None,
-           batch: int = 30):
+           batch: int = 30, chunk_frames: int = 200):
+    _enable_gpu_memory_growth()
     # --- Resolve processed-frame window -> per-camera video frames ---
     fm = load_frame_mapping(rat, session)
     proc = [p for p in range(start_frame, start_frame + n_frames)
@@ -219,21 +274,15 @@ def render(new_model: str, old_model: str, rat: str, session: str,
     cam0_frames = per_cam[:, 0]
     n_cams = per_cam.shape[1]
 
-    # --- Read + preprocess frames ONCE (shared across both models) ---
-    print(f"Reading {n_frames} frames x {n_cams} cams ...", flush=True)
-    frames = read_session_frames_per_cam(rat, session, per_cam)
-    pre = preprocess_for_sleap(frames)
-
     calib = build_calibration_for_session(rat, session)
     print(f"  calibration date: {calib['cal_date']}", flush=True)
 
-    # --- Inference: new then old (one model resident at a time) ---
-    print("Running NEW model ...", flush=True)
-    new_3d = run_sleap_inference(new_model, pre, n_frames, n_cams, calib,
-                                 peak_threshold, batch=batch)
-    print("Running OLD model ...", flush=True)
-    old_3d = run_sleap_inference(old_model, pre, n_frames, n_cams, calib,
-                                 peak_threshold, batch=batch)
+    # --- Inference: stream chunks, both models per chunk (bounds RAM) ---
+    print(f"Running inference on {n_frames} frames x {n_cams} cams "
+          f"(chunk={chunk_frames}) ...", flush=True)
+    new_3d, old_3d = run_inference_streaming(
+        new_model, old_model, rat, session, per_cam, calib,
+        peak_threshold=peak_threshold, batch=batch, chunk_frames=chunk_frames)
 
     # Visual-parity median filter (matches QC/render conventions).
     new_3d_s = median_filter(new_3d, size=(SLEAP_MEDFILT, 1, 1))
@@ -257,7 +306,7 @@ def render(new_model: str, old_model: str, rat: str, session: str,
 
     # --- Set up writer ---
     cam_name = f"Camera{camera}"
-    video_file = Path(sleap_path(rat, session)) / cam_name / "0.mp4"
+    video_file = sleap_video_path(rat, session, camera=cam_name)
     cap = cv2.VideoCapture(str(video_file))
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_file}")
@@ -331,13 +380,17 @@ def main():
     ap.add_argument("--peak_threshold", type=float, default=0.01)
     ap.add_argument("--batch", type=int, default=30,
                     help="images per SLEAP forward pass (lower if GPU OOMs)")
+    ap.add_argument("--chunk_frames", type=int, default=200,
+                    help="frames read into RAM per chunk during inference "
+                         "(lower if system RAM OOMs; ~62 MB/frame x3 cams)")
     ap.add_argument("--out_subdir", default=None,
                     help="override video subdir name "
                          "(default: <new>_vs_<old>)")
     args = ap.parse_args()
     render(args.new_model, args.old_model, args.rat, args.session,
            args.start_frame, args.n_frames, args.camera, args.fps,
-           args.peak_threshold, args.out_subdir, args.batch)
+           args.peak_threshold, args.out_subdir, args.batch,
+           args.chunk_frames)
 
 
 if __name__ == "__main__":

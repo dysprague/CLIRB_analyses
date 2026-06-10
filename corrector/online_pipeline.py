@@ -31,6 +31,7 @@ _THIS = Path(__file__).resolve()
 sys.path.insert(0, str(_THIS.parent.parent))
 
 from data_io import sleap_path  # noqa: E402
+from config import sleap_video_path  # noqa: E402
 from corrector.data_world_2d import load_session_calibration  # noqa: E402
 
 VIDEO_HEIGHT = 1200
@@ -54,10 +55,11 @@ CAMERA_DIRS = ("Camera0", "Camera1", "Camera2")
 # ---------------------------------------------------------------------------
 def _open_session_videos(rat: str, session: str):
     """Return list of cv2.VideoCapture objects, one per camera, ordered cam0..2."""
-    sp = sleap_path(rat, session)
     caps = []
     for cd in CAMERA_DIRS:
-        path = os.path.join(sp, cd, "0.mp4")
+        # Videos live on the SMB share even when keypoints are cached locally;
+        # sleap_video_path resolves that (cache if present, else DATA_ROOT).
+        path = sleap_video_path(rat, session, camera=cd)
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             raise FileNotFoundError(f"Could not open {path}")

@@ -50,37 +50,52 @@ def _center_per_frame(arr: np.ndarray) -> np.ndarray:
 
 def _build_corrected(ck, model, name, rat, session, sl, dn, device,
                       calibration_minutes=5.0, calibration_n_sample=1000,
-                      smooth_size=11):
-    """Returns sl_corr_in_sleap aligned to the SLEAP timeline (shape == sl)."""
+                      smooth_size=11, smooth_causal=False):
+    """Returns (sl_corr_in_sleap, dn_in_sleap), both on the SLEAP timeline
+    and shape == sl. Handles both legacy SL->DN and new DN->SL conventions.
+    """
     if name in ("triangulation_refiner", "temporal_triangulation_refiner"):
         raise NotImplementedError(
             "3D triptych is wired for 3D-input and 'temporal_mlp_2d*' "
             "correctors only; pure saved-2D-Procrustes refiners aren't.")
-    # Procrustes on (sl, dn) — shared by all 3D-input + temporal_mlp_2d* models.
+    procrustes_direction = ck.get("procrustes_direction", "sleap_to_dannce")
     idx = calibration_indices(len(sl), calibration_minutes, SLEAP_HZ,
                                calibration_n_sample, seed=0)
-    tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+    if procrustes_direction == "dannce_to_sleap":
+        # tx.apply maps DANNCE -> SLEAP. The corrector lives in SLEAP world,
+        # so sl is already in input space; dn is what gets transformed for
+        # the comparison panel.
+        tx = fit_procrustes(dn[idx], sl[idx], try_z_flip=True)
+        sl_aligned_dn = sl.astype(np.float32)        # already in corrector frame
+        dn_in_sleap = tx["apply"](dn).astype(np.float32)
+    else:
+        tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+        sl_aligned_dn = tx["apply"](sl).astype(np.float32)
+        dn_in_sleap = tx["apply_inverse"](dn).astype(np.float32)
     print(f"  Procrustes residual={tx['residual']:.2f}  scale={tx['s']:.4f}  "
-          f"z_flipped={tx['z_flipped']}", flush=True)
-    sl_aligned_dn = tx["apply"](sl).astype(np.float32)
+          f"z_flipped={tx['z_flipped']}  direction={procrustes_direction}",
+          flush=True)
     if name == "temporal_mlp_2d":
         from corrector.evaluate_all import correct_temporal_mlp_2d
-        sl_corr_dannce = correct_temporal_mlp_2d(
+        sl_corr_native = correct_temporal_mlp_2d(
             model, rat, session, sl_aligned_dn, device,
             ctx=ck.get("ctx", 5))
     elif name == "temporal_mlp_2d_reproj":
         from corrector.evaluate_all import correct_temporal_mlp_2d_reproj
-        sl_corr_dannce = correct_temporal_mlp_2d_reproj(
+        sl_corr_native = correct_temporal_mlp_2d_reproj(
             model, rat, session, sl_aligned_dn, device,
             ctx=ck.get("ctx", 5),
-            smooth_size=smooth_size)
+            smooth_size=smooth_size, smooth_causal=smooth_causal)
     else:
         eval_ctx = ck.get("ctx", 1)
         eval_vel_acc = (name == "velacc_mlp")
-        sl_corr_dannce = correct_world(model, sl_aligned_dn, device,
+        sl_corr_native = correct_world(model, sl_aligned_dn, device,
                                          ctx=eval_ctx, vel_acc=eval_vel_acc)
-    sl_corr_in_sleap = tx["apply_inverse"](sl_corr_dannce).astype(np.float32)
-    return sl_corr_in_sleap, tx
+    if procrustes_direction == "dannce_to_sleap":
+        sl_corr_in_sleap = sl_corr_native.astype(np.float32)
+    else:
+        sl_corr_in_sleap = tx["apply_inverse"](sl_corr_native).astype(np.float32)
+    return sl_corr_in_sleap, dn_in_sleap
 
 
 def _draw_skeleton_3d(ax, pts, color, edges=EDGES, marker_size=14,
@@ -101,7 +116,8 @@ def _draw_skeleton_3d(ax, pts, color, edges=EDGES, marker_size=14,
 
 def render(ckpt_path: str, rat: str, session: str, start_frame: int,
            n_frames: int, fps: int, spacing_mm: float, azim: float, elev: float,
-           out_subdir_name: str | None, smooth_size: int = 11):
+           out_subdir_name: str | None, smooth_size: int = 11,
+           smooth_causal: bool = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     name = ck["model_name"]
@@ -136,10 +152,9 @@ def render(ckpt_path: str, rat: str, session: str, start_frame: int,
 
     print(f"Loading {rat}/{session} ...", flush=True)
     sl, dn = load_paired_world(rat, session)
-    sl_corr_in_sleap, tx = _build_corrected(ck, model, name, rat, session,
-                                              sl, dn, device,
-                                              smooth_size=smooth_size)
-    dn_in_sleap = tx["apply_inverse"](dn).astype(np.float32)
+    sl_corr_in_sleap, dn_in_sleap = _build_corrected(
+        ck, model, name, rat, session, sl, dn, device,
+        smooth_size=smooth_size, smooth_causal=smooth_causal)
 
     end_frame = min(start_frame + n_frames, len(sl), len(dn))
     rng = slice(start_frame, end_frame)
@@ -165,15 +180,23 @@ def render(ckpt_path: str, rat: str, session: str, start_frame: int,
     arrs_offset = [a + o for a, o in zip(arrs_centered, offsets)]
 
     # Tight axis limits from the windowed data (percentile-based crop so a
-    # single far-flung outlier keypoint doesn't shrink the rest of the frame).
+    # single far-flung outlier keypoint doesn't blow up the frame). The
+    # corrector inference path doesn't apply the OUTLIER_THRESHOLD_MM=1000
+    # guard that training uses, so one bad triangulation can drag a
+    # corrector output keypoint 4+ meters off-arena; the percentiles below
+    # are wide enough to admit normal motion but tight enough to drop those.
     flat = np.concatenate([a.reshape(-1, 3) for a in arrs_offset], axis=0)
     flat = flat[np.isfinite(flat).all(axis=1)]
     p_lo = np.percentile(flat, 1.0, axis=0)
     p_hi = np.percentile(flat, 99.0, axis=0)
-    # X needs to span all three skeletons; widen X to absolute min/max but use
-    # percentile on Y and Z so we crop tightly around the rat body.
-    x_lo = flat[:, 0].min()
-    x_hi = flat[:, 0].max()
+    # X needs to span all three skeletons; use wider percentiles than Y/Z
+    # to admit legitimate body extents at both ends of the row but still
+    # drop rare outliers. Guard with the spacing-anchored fallback so a
+    # very still session can't collapse the X range below the layout width.
+    x_lo = float(np.percentile(flat[:, 0], 0.1))
+    x_hi = float(np.percentile(flat[:, 0], 99.9))
+    x_lo = min(x_lo, -spacing_mm * 0.5)
+    x_hi = max(x_hi, spacing_mm * 2.5)
     pad_x = (x_hi - x_lo) * 0.04
     pad_yz = 30.0
     lo = np.array([x_lo - pad_x, p_lo[1] - pad_yz, p_lo[2] - pad_yz],
@@ -298,11 +321,16 @@ def main():
                     help="median-filter size inside the "
                          "temporal_mlp_2d_reproj corrector. Default 11; pass "
                          "15 for the production-recommended smoothing.")
+    ap.add_argument("--smooth_causal", action="store_true",
+                    help="use a causal median (only frames preceding the "
+                         "current frame) instead of the default symmetric "
+                         "median_filter. Models the online causal-buffer setup.")
     args = ap.parse_args()
     render(args.ckpt, args.rat, args.session, args.start_frame,
            args.n_frames, args.fps, args.spacing_mm,
            args.azim, args.elev, args.out_subdir,
-           smooth_size=args.smooth_size)
+           smooth_size=args.smooth_size,
+           smooth_causal=args.smooth_causal)
 
 
 if __name__ == "__main__":

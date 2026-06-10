@@ -91,13 +91,19 @@ def _load_frame_mapping(rat: str, session: str):
 
 def load_session_2d(rat: str, session: str,
                      smooth_dannce: bool = True,
-                     drop_first_seconds: float = 0.0) -> SavedSession2D:
+                     drop_first_seconds: float = 0.0,
+                     skip_dannce: bool = False) -> SavedSession2D:
     """Load one session's 2D-input corrector data.
 
     smooth_dannce: apply median-25 filter to DANNCE 3D (consistent with
                    corrector.data_world.load_paired_world). Defaults True.
     drop_first_seconds: drop the first N seconds of processed samples
                        (caller typically does its own warmup handling).
+    skip_dannce: for inference-only use on sessions that do not have DANNCE
+                 keypoints yet. y_dannce_3d is filled with zeros and no
+                 DANNCE-based drop filtering is applied. The corrector
+                 inference path (correct_temporal_mlp_2d_reproj) never reads
+                 y_dannce_3d, only the 2D/conf/triang/calib fields.
     """
     cam_frames = _load_frame_mapping(rat, session)  # (P, 3) int
     P = len(cam_frames)
@@ -120,28 +126,35 @@ def load_session_2d(rat: str, session: str,
                             f">= triang len {len(triang_full)}")
     x_triang_3d = triang_full[cam0_fr]                     # (P, 23, 3)
 
-    # --- DANNCE 3D (target): indexed by SLEAP video frame via aligned_data ---
-    keys = load_sleap_dannce_keys(rat, session)
-    aligned = load_aligned_data(rat, session)
-    dn = keys["dannce_keys_3D"]
-    if dn.ndim == 4:
-        dn = dn.squeeze(axis=1).transpose(0, 2, 1)
+    if skip_dannce:
+        y_dannce_3d = np.zeros_like(x_triang_3d)
+        keep_mask = (cam0_fr >= 0)
+        valid_dn = np.ones(P, dtype=bool)
+        n_oob_sleap = 0
+        n_dropped = 0
     else:
-        dn = dn.transpose(0, 2, 1)
-    dn = dn.astype(np.float32)
-    if smooth_dannce:
-        dn = median_filter(dn, size=(DANNCE_MEDFILT, 1, 1))
-    didx_full = np.asarray(aligned["dannce_idx_for_sleap_cams"]).astype(np.int64).ravel()
-    # didx_full is indexed by SLEAP video frame. Look up DANNCE row for each
-    # cam0_frame, with clipping for out-of-range entries.
-    keep_mask = (cam0_fr >= 0) & (cam0_fr < len(didx_full))
-    n_oob_sleap = int((~keep_mask).sum())
-    cam0_fr_clip = np.clip(cam0_fr, 0, len(didx_full) - 1)
-    dn_rows = didx_full[cam0_fr_clip]
-    valid_dn = (dn_rows >= 0) & (dn_rows < len(dn))
-    n_dropped = int((~valid_dn | ~keep_mask).sum())
-    dn_rows_clip = np.clip(dn_rows, 0, len(dn) - 1)
-    y_dannce_3d = dn[dn_rows_clip]                         # (P, 23, 3)
+        # --- DANNCE 3D (target): indexed by SLEAP video frame via aligned_data ---
+        keys = load_sleap_dannce_keys(rat, session)
+        aligned = load_aligned_data(rat, session)
+        dn = keys["dannce_keys_3D"]
+        if dn.ndim == 4:
+            dn = dn.squeeze(axis=1).transpose(0, 2, 1)
+        else:
+            dn = dn.transpose(0, 2, 1)
+        dn = dn.astype(np.float32)
+        if smooth_dannce:
+            dn = median_filter(dn, size=(DANNCE_MEDFILT, 1, 1))
+        didx_full = np.asarray(aligned["dannce_idx_for_sleap_cams"]).astype(np.int64).ravel()
+        # didx_full is indexed by SLEAP video frame. Look up DANNCE row for each
+        # cam0_frame, with clipping for out-of-range entries.
+        keep_mask = (cam0_fr >= 0) & (cam0_fr < len(didx_full))
+        n_oob_sleap = int((~keep_mask).sum())
+        cam0_fr_clip = np.clip(cam0_fr, 0, len(didx_full) - 1)
+        dn_rows = didx_full[cam0_fr_clip]
+        valid_dn = (dn_rows >= 0) & (dn_rows < len(dn))
+        n_dropped = int((~valid_dn | ~keep_mask).sum())
+        dn_rows_clip = np.clip(dn_rows, 0, len(dn) - 1)
+        y_dannce_3d = dn[dn_rows_clip]                         # (P, 23, 3)
 
     # Final keep mask: in-range on both sides + drop_first_seconds prefix
     final_keep = keep_mask & valid_dn

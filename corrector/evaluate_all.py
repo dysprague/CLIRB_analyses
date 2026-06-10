@@ -342,7 +342,8 @@ def correct_temporal_mlp_2d(model, rat, session, sl_aligned_dn, device,
 def correct_temporal_mlp_2d_reproj(model, rat, session, sl_aligned_dn, device,
                                      ctx, batch: int = 4096,
                                      smooth_size: int = 11,
-                                     smooth_causal: bool = False):
+                                     smooth_causal: bool = False,
+                                     skip_dannce: bool = False):
     """Inference for TemporalMLPWith2DReproj. Builds per-SLEAP-frame 2D + conf
     + vis + reprojection-residual bundles by scattering from the processed-
     frame stream, then runs the temporal-windowed model.
@@ -371,7 +372,8 @@ def correct_temporal_mlp_2d_reproj(model, rat, session, sl_aligned_dn, device,
     from corrector.data_world_2d import reproject_all_cams
 
     T_sleap = len(sl_aligned_dn)
-    sd = load_session_2d(rat, session, smooth_dannce=True)
+    sd = load_session_2d(rat, session, smooth_dannce=True,
+                          skip_dannce=skip_dannce)
     if len(sd.x_2d) == 0:
         return sl_aligned_dn.copy()
 
@@ -473,13 +475,22 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
                  device, max_residual=60.0, calibration_minutes=5.0,
                  calibration_n_sample=1000, tmpl_cache=None,
                  run_groupO=True, model_name: str = "mlp",
-                 smooth_size: int = 11, smooth_causal: bool = False):
+                 smooth_size: int = 11, smooth_causal: bool = False,
+                 procrustes_direction: str = "sleap_to_dannce"):
     """Compute all metrics for one session. Returns a dict or {error: ...}.
 
     model_name is used to dispatch between the 3D-input path (sl, dn from
     load_paired_world) and the 2D-input path (triangulation_refiner: Procrustes
     fit on saved triangulated SLEAP + DANNCE, then per-processed-frame
     correction scattered back to the SLEAP timeline).
+
+    procrustes_direction: "sleap_to_dannce" (legacy) trains/runs the model
+    in DANNCE world (input = tx.apply(sl), target = dn). "dannce_to_sleap"
+    (new convention starting with v4_dn2sl) trains/runs the model in SLEAP
+    world (input = sl raw, target = tx.apply(dn)). Downstream metrics are
+    computed in whichever world the corrector lives in — both produce the
+    same F1 because the template-matching distance threshold is rescaled
+    by the Procrustes scale factor identically on both sides.
     """
     if tmpl_cache is not None and rat in tmpl_cache:
         tmpl_data = tmpl_cache[rat]
@@ -496,6 +507,15 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
     # 3D-input path uses (sl, dn) over the calibration window.
     # 2D-input path uses (saved triangulated SLEAP, DANNCE) over the same
     # calibration window — this matches the training-time alignment exactly.
+    #
+    # Direction:
+    #   "sleap_to_dannce" (legacy): tx maps sl -> dn. Corrector lives in DN
+    #     world. sl_aligned_dn = tx.apply(sl); dn target unchanged.
+    #   "dannce_to_sleap" (new):    tx maps dn -> sl. Corrector lives in SL
+    #     world. sl_aligned_dn = sl raw; dn target = tx.apply(dn).
+    # The variable name `sl_aligned_dn` is kept for readability vs the rest
+    # of the function — it always means "sl in the corrector's input space",
+    # regardless of direction.
     if model_name in ("triangulation_refiner", "temporal_triangulation_refiner"):
         try:
             sd_for_tx = load_session_2d(rat, session, smooth_dannce=True)
@@ -508,6 +528,8 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
                                    calibration_n_sample, seed=0)
         if len(idx) < 100:
             return {"rat": rat, "session": session, "error": "no cal window"}
+        # These older models predate the procrustes_direction concept; keep
+        # legacy SL->DN behavior unconditionally.
         tx = fit_procrustes(sd_for_tx.x_triang_3d[idx],
                             sd_for_tx.y_dannce_3d[idx], try_z_flip=True)
     else:
@@ -515,13 +537,25 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
                                    calibration_n_sample, seed=0)
         if len(idx) < 100:
             return {"rat": rat, "session": session, "error": "no cal window"}
-        tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+        if procrustes_direction == "dannce_to_sleap":
+            tx = fit_procrustes(dn[idx], sl[idx], try_z_flip=True)
+        else:
+            tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
     if tx["residual"] > max_residual:
         return {"rat": rat, "session": session,
                 "error": f"residual {tx['residual']:.1f} > {max_residual}"}
 
-    # Apply Procrustes + corrector in DANNCE space
-    sl_aligned_dn = tx["apply"](sl).astype(np.float32)
+    # Build sl_aligned_dn (sl in corrector input space) and dn_w
+    # (target / comparison signal in the same space).
+    if procrustes_direction == "dannce_to_sleap":
+        sl_aligned_dn = sl.astype(np.float32)               # already in SLEAP / corrector space
+        dn_in_corrector_space = tx["apply"](dn).astype(np.float32)
+        # Mapping back to native SLEAP world is a no-op since we already are there.
+        tx_back_to_sleap = lambda pts: pts
+    else:
+        sl_aligned_dn = tx["apply"](sl).astype(np.float32)
+        dn_in_corrector_space = dn.astype(np.float32)
+        tx_back_to_sleap = tx["apply_inverse"]
     if model_name == "triangulation_refiner":
         sl_corrected_dn = correct_triangulation_refiner(
             model, rat, session, sl_aligned_dn, tx, device)
@@ -538,7 +572,10 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
     else:
         sl_corrected_dn = correct_world(model, sl_aligned_dn, device,
                                          ctx=model_ctx, vel_acc=model_vel_acc)
-    dn_w = dn.astype(np.float32)
+    # `dn_w` here is the comparison target in the corrector's input space —
+    # for the legacy SL->DN direction that's just DANNCE world; for the new
+    # DN->SL direction it's DANNCE projected into SLEAP world.
+    dn_w = dn_in_corrector_space
 
     # Eval on the post-calibration window so we don't reward fitting on Procrustes data
     eval_start = int(calibration_minutes * 60 * SLEAP_HZ)
@@ -549,6 +586,9 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
     d_eval = dn_w[eval_start:]
 
     # ---- Keypoint MSE ----
+    # NOTE: under DN->SL the Procrustes scale factor (close to 1) rescales
+    # both sides identically, so kp_mse is comparable to legacy numbers up
+    # to that scale^2 factor (~1.00x in practice).
     err_a = (a_eval - d_eval) ** 2
     err_c = (c_eval - d_eval) ** 2
     kp_mse_align = float(err_a.sum(axis=2).mean())
@@ -557,8 +597,8 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
     per_kp_corr = err_c.sum(axis=2).mean(axis=0).tolist()
 
     # ---- xyz PC MSE (project to template PC space; bring everything back to SLEAP space first) ----
-    sl_aligned_sleap = tx["apply_inverse"](sl_aligned_dn).astype(np.float32)
-    sl_corr_sleap = tx["apply_inverse"](sl_corrected_dn).astype(np.float32)
+    sl_aligned_sleap = tx_back_to_sleap(sl_aligned_dn).astype(np.float32)
+    sl_corr_sleap = tx_back_to_sleap(sl_corrected_dn).astype(np.float32)
 
     # The rat's template lives in z-FLIPPED SLEAP egocentric coords
     def for_template(arr):
@@ -568,7 +608,11 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
 
     sl_a_t = for_template(sl_aligned_sleap[eval_start:])
     sl_c_t = for_template(sl_corr_sleap[eval_start:])
-    dn_t = for_template(tx["apply_inverse"](dn_w[eval_start:]))
+    # For dn we need the raw SLEAP-native DANNCE-resampled signal. Under
+    # legacy: dn_w lives in DANNCE world, so tx_back_to_sleap rotates it to
+    # SLEAP. Under DN->SL: dn_w already lives in SLEAP world, tx_back_to_sleap
+    # is the identity.
+    dn_t = for_template(tx_back_to_sleap(dn_w[eval_start:]))
 
     pcu = tmpl_data["pcs_to_use"].ravel().astype(int)
     pc_a = project_to_template_pcs(sl_a_t, tmpl_data, pcu)
@@ -691,7 +735,7 @@ def compute_full(rat, session, model, model_ctx, model_vel_acc,
 
     if run_groupO:
         sl_ev = sl[eval_start:].astype(np.float32)
-        dn_ev = tx["apply_inverse"](dn_w[eval_start:]).astype(np.float32)
+        dn_ev = tx_back_to_sleap(dn_w[eval_start:]).astype(np.float32)
         sl_a_ev = sl_aligned_sleap[eval_start:]
         sl_c_ev = sl_corr_sleap[eval_start:]
         for label, sl_v in [("raw_groupO", sl_ev),
@@ -838,6 +882,9 @@ def main():
     if args.template_suffix:
         print(f"using template suffix {args.template_suffix!r}", flush=True)
 
+    procrustes_direction = ck.get("procrustes_direction", "sleap_to_dannce")
+    print(f"procrustes_direction: {procrustes_direction}", flush=True)
+
     rows = []
     for rat, s in all_sessions:
         t0 = time.time()
@@ -848,7 +895,8 @@ def main():
                             run_groupO=not args.no_groupO,
                             model_name=name,
                             smooth_size=args.smooth_size,
-                            smooth_causal=args.smooth_causal)
+                            smooth_causal=args.smooth_causal,
+                            procrustes_direction=procrustes_direction)
         rows.append(out)
         if "error" in out:
             print(f"  {rat}/{s}: ERROR {out['error']}  ({time.time()-t0:.1f}s)",

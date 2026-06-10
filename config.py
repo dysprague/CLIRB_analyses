@@ -83,8 +83,18 @@ def sleap_path(rat, session):
     return os.path.join(session_path(rat, session), "sleap")
 
 def processed_path(rat, session):
-    #return os.path.join(session_path(rat, session), "processed")
-    return os.path.join("/home/yutaka-sprague/CLIRB/data/sleap_dannce_keys_2026_02_18", rat, session)
+    """Per-session "processed" folder holding sleap_dannce_keys.* and
+    aligned_data.* outputs. Prefer the local NVMe cache used for the
+    Phase G/H/I work (R1/R2/R3 through 2026-02-18); fall back to the
+    per-session `processed/` subdir on the SMB share for any session
+    not present in the cache (e.g. new rats R4/R5/R6, fresh data).
+    """
+    local = os.path.join(
+        "/home/yutaka-sprague/CLIRB/data/sleap_dannce_keys_2026_02_18",
+        rat, session)
+    if os.path.isdir(local):
+        return local
+    return os.path.join(session_path(rat, session), "processed")
 
 def template_path(rat, template_file):
     return os.path.join(DATA_ROOT, rat, "templates", template_file)

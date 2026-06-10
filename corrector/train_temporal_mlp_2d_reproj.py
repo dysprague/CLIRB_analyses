@@ -120,7 +120,11 @@ class TemporalMLP2DReprojDataset(Dataset):
                     if verbose:
                         print(f"  skip {rat}/{s}: no cal window", flush=True)
                     continue
-                tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+                # Procrustes DANNCE -> SLEAP so the model trains entirely in
+                # SLEAP world. Lets online inference skip the runtime Procrustes
+                # — `keypoints_3D` straight out of `triangulate(...)` is already
+                # in the model's native input frame.
+                tx = fit_procrustes(dn[idx], sl[idx], try_z_flip=True)
                 self.session_residuals.append((rat, s, float(tx["residual"])))
                 if tx["residual"] > max_residual:
                     if verbose:
@@ -128,8 +132,8 @@ class TemporalMLP2DReprojDataset(Dataset):
                               f"> {max_residual}", flush=True)
                     continue
 
-                sl_aligned = tx["apply"](sl).astype(np.float32)
-                dn32 = dn.astype(np.float32)
+                sl_aligned = sl.astype(np.float32)               # already in SLEAP world
+                dn32 = tx["apply"](dn).astype(np.float32)        # DANNCE -> SLEAP world (target)
 
                 # Per-processed-frame reprojection of the saved triangulated 3D
                 # (un-smoothed geometry that actually produced the 2D dets).
@@ -491,6 +495,7 @@ def main():
         "targeted_noise_max_kp": args.targeted_noise_max_kp,
         "resid_norm_px": RESID_NORM_PX,
         "video_w": VIDEO_W, "video_h": VIDEO_H,
+        "procrustes_direction": "dannce_to_sleap",
     }
     torch.save(save, ckpt)
     print(f"\nsaved {ckpt}  best_val_mse={best_val:.3f}", flush=True)

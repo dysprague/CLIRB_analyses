@@ -138,7 +138,10 @@ def render(ckpt_path: str, rat: str, session: str,
            calibration_n_sample: int = 1000,
            single_panel: bool = False,
            out_subdir_name: str | None = None,
-           smooth_size: int = 11):
+           smooth_size: int = 11,
+           smooth_causal: bool = False,
+           no_dannce: bool = False,
+           match_raw_smoothing: bool = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     name = ck["model_name"]
@@ -174,8 +177,22 @@ def render(ckpt_path: str, rat: str, session: str,
     eval_ctx = ck.get("ctx", 1)
     eval_vel_acc = (name == "velacc_mlp")
 
+    procrustes_direction = ck.get("procrustes_direction", "sleap_to_dannce")
+    print(f"procrustes_direction: {procrustes_direction}  no_dannce: {no_dannce}",
+          flush=True)
     print(f"Loading {rat}/{session} ...", flush=True)
-    sl, dn = load_paired_world(rat, session)
+    if no_dannce:
+        # Build the SLEAP-timeline 3D directly from triang_keys_3D.npy without
+        # touching the DANNCE-bundled files. Median-11 to match the smoothing
+        # applied by load_paired_world (which the corrector training expected
+        # on its pose_window input).
+        from data_io import load_sleap_keys_3d
+        from scipy.ndimage import median_filter as _medfilt
+        sl_full = load_sleap_keys_3d(rat, session).astype(np.float32)
+        sl = _medfilt(sl_full, size=(11, 1, 1)).astype(np.float32)
+        dn = None
+    else:
+        sl, dn = load_paired_world(rat, session)
 
     if name in ("triangulation_refiner", "temporal_triangulation_refiner"):
         # 2D-input path: fit Procrustes on saved triangulated SLEAP (matches
@@ -201,11 +218,36 @@ def render(ckpt_path: str, rat: str, session: str,
                 model, rat, session, sl_aligned, tx, device,
                 ctx=ck.get("ctx", 5))
     else:
-        idx = calibration_indices(len(sl), calibration_minutes, SLEAP_HZ,
-                                   calibration_n_sample, seed=0)
-        tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
-        print(f"  Procrustes residual={tx['residual']:.2f}  scale={tx['s']:.4f}  "
-              f"z_flipped={tx['z_flipped']}", flush=True)
+        if procrustes_direction == "dannce_to_sleap" or no_dannce:
+            # The corrector itself doesn't need a SL->DN Procrustes (it lives
+            # in SLEAP world). But we still need a DN->SL transform for the
+            # DANNCE display panel if we have DANNCE data. Use an identity
+            # for the corrector path and fit a separate dn2sl when needed.
+            class _IdentityTx:
+                def __init__(self):
+                    self.__dict__["apply"] = lambda pts: pts
+                    self.__dict__["apply_inverse"] = lambda pts: pts
+                def __getitem__(self, key):
+                    return getattr(self, key)
+            tx = _IdentityTx()
+            if no_dannce:
+                tx_dn_to_sl = None
+                print("  no Procrustes (no_dannce)", flush=True)
+            else:
+                idx = calibration_indices(len(sl), calibration_minutes, SLEAP_HZ,
+                                           calibration_n_sample, seed=0)
+                tx_dn_to_sl = fit_procrustes(dn[idx], sl[idx], try_z_flip=True)
+                print(f"  Procrustes (dn->sl for display) residual="
+                      f"{tx_dn_to_sl['residual']:.2f}  "
+                      f"scale={tx_dn_to_sl['s']:.4f}  "
+                      f"z_flipped={tx_dn_to_sl['z_flipped']}", flush=True)
+        else:
+            idx = calibration_indices(len(sl), calibration_minutes, SLEAP_HZ,
+                                       calibration_n_sample, seed=0)
+            tx = fit_procrustes(sl[idx], dn[idx], try_z_flip=True)
+            tx_dn_to_sl = None  # legacy path uses tx.apply_inverse below
+            print(f"  Procrustes residual={tx['residual']:.2f}  scale={tx['s']:.4f}  "
+                  f"z_flipped={tx['z_flipped']}", flush=True)
         sl_aligned = tx["apply"](sl).astype(np.float32)
         if name == "temporal_mlp_2d":
             from corrector.evaluate_all import correct_temporal_mlp_2d
@@ -217,7 +259,9 @@ def render(ckpt_path: str, rat: str, session: str,
             sl_corr_dannce_space = correct_temporal_mlp_2d_reproj(
                 model, rat, session, sl_aligned, device,
                 ctx=ck.get("ctx", 5),
-                smooth_size=smooth_size)
+                smooth_size=smooth_size,
+                smooth_causal=smooth_causal,
+                skip_dannce=no_dannce)
         else:
             sl_corr_dannce_space = correct_world(model, sl_aligned, device,
                                                   ctx=eval_ctx, vel_acc=eval_vel_acc)
@@ -225,10 +269,20 @@ def render(ckpt_path: str, rat: str, session: str,
     # Bring everything back into SLEAP world space for projection onto Camera{N}.
     # SLEAP raw is already in SLEAP space (and was median-filtered upstream by
     # load_paired_world).
-    # DANNCE -> SLEAP space  via apply_inverse.
-    # SLEAP_corrected (lives in DANNCE space because that was the regression
-    # target) -> SLEAP space via apply_inverse.
-    dn_in_sleap = tx["apply_inverse"](dn).astype(np.float32)
+    # DANNCE -> SLEAP space via apply_inverse.
+    # SLEAP_corrected -> SLEAP space via apply_inverse. For dn2sl checkpoints
+    # the corrector output is already in SLEAP world and apply_inverse is
+    # identity.
+    if no_dannce:
+        dn_in_sleap = None
+    elif tx_dn_to_sl is not None:
+        # dn2sl convention: separately-fit Procrustes for the DN display panel.
+        dn_in_sleap = tx_dn_to_sl["apply"](dn).astype(np.float32)
+    else:
+        # legacy SL->DN: invert the corrector's Procrustes for DN.
+        dn_in_sleap = tx["apply_inverse"](dn).astype(np.float32)
+    # For dn2sl checkpoints `tx.apply_inverse` is identity, so the corrector
+    # output is already in SLEAP world. For legacy SL->DN, invert.
     sl_corr_in_sleap = tx["apply_inverse"](sl_corr_dannce_space).astype(np.float32)
 
     # Cosmetic: the triangulation_refiner was trained on un-smoothed
@@ -241,15 +295,51 @@ def render(ckpt_path: str, rat: str, session: str,
             np.float32)
 
     cal_folder = calibration_path(rat, session)
-    end_frame = min(start_frame + n_frames, len(sl), len(dn))
+    end_cap = len(sl) if no_dannce else min(len(sl), len(dn))
+    end_frame = min(start_frame + n_frames, end_cap)
     rng = slice(start_frame, end_frame)
+
+    # Build what gets shown for the raw cyan overlay. `sl` itself is the
+    # corrector input and must stay median-11 (matches training). When
+    # match_raw_smoothing is on, we display a version of the raw SLEAP with
+    # the same smoothing the corrector output gets — same kernel, same
+    # causality — so any remaining visible lag is the model's own behavior,
+    # not a smoothing mismatch between the cyan and green skeletons.
+    if match_raw_smoothing and smooth_size and smooth_size > 1:
+        from data_io import load_sleap_keys_3d as _load_sl3d
+        sl_unsmoothed = _load_sl3d(rat, session).astype(np.float32)
+        if smooth_causal:
+            pad = smooth_size - 1
+            padded = np.concatenate(
+                [np.repeat(sl_unsmoothed[:1], pad, axis=0), sl_unsmoothed],
+                axis=0)
+            T = sl_unsmoothed.shape[0]
+            widx = np.arange(T)[:, None] + np.arange(smooth_size)[None, :]
+            sl_for_display = np.median(padded[widx], axis=1).astype(np.float32)
+            print(f"  raw cyan: causal-{smooth_size} median (matched)",
+                  flush=True)
+        else:
+            from scipy.ndimage import median_filter as _mf
+            sl_for_display = _mf(sl_unsmoothed,
+                                  size=(smooth_size, 1, 1)).astype(np.float32)
+            print(f"  raw cyan: symmetric-{smooth_size} median (matched)",
+                  flush=True)
+    else:
+        sl_for_display = sl
+
     print(f"Projecting {end_frame - start_frame} frames to Camera{camera}...",
           flush=True)
-    sleap_2d = project_3d_to_2d_for_camera(sl[rng], cal_folder, camera_idx=camera)
+    sleap_2d = project_3d_to_2d_for_camera(sl_for_display[rng], cal_folder,
+                                            camera_idx=camera)
     sleap_corr_2d = project_3d_to_2d_for_camera(
         sl_corr_in_sleap[rng], cal_folder, camera_idx=camera)
-    dannce_2d = project_3d_to_2d_for_camera(
-        dn_in_sleap[rng], cal_folder, camera_idx=camera)
+    dannce_2d = (None if no_dannce
+                  else project_3d_to_2d_for_camera(
+                      dn_in_sleap[rng], cal_folder, camera_idx=camera))
+    if no_dannce and not single_panel:
+        print("  no_dannce: forcing single_panel (DN required for two-panel)",
+              flush=True)
+        single_panel = True
 
     # Video lives in the SMB share — the local 2D cache only contains the
     # keypoint / calibration files, not the videos.
@@ -325,7 +415,11 @@ def render(ckpt_path: str, rat: str, session: str,
     writer.release(); cap.release()
     print(f"saved {out_path}", flush=True)
 
-    # Paired PC trajectory plot
+    # Paired PC trajectory plot — needs DANNCE and a per-rat template.
+    if no_dannce or rat not in RAT_TEMPLATE:
+        print("  skipping PC plot (no DANNCE or no template for this rat)",
+              flush=True)
+        return out_path, None
     fig_path = fig_subdir / f"{rat}_{session}_f{start_frame}-{end_frame}_pc.png"
     render_pc_plot(rat, session, sl, sl_corr_in_sleap, dn_in_sleap,
                    start_frame, end_frame - start_frame, fig_path)
@@ -352,12 +446,29 @@ def main():
                     help="median-filter size inside the "
                          "temporal_mlp_2d_reproj corrector. Default 11; pass "
                          "15 for the production-recommended smoothing.")
+    ap.add_argument("--smooth_causal", action="store_true",
+                    help="use a causal median (only frames preceding the "
+                         "current frame) instead of the default symmetric "
+                         "median_filter. Models the online causal-buffer setup.")
+    ap.add_argument("--no_dannce", action="store_true",
+                    help="render without DANNCE — skip DANNCE load, projection, "
+                         "and PC plot. Use for sessions that haven't been "
+                         "DANNCE-processed yet. Requires a dn2sl checkpoint "
+                         "(no per-session Procrustes is fit). Forces single_panel.")
+    ap.add_argument("--match_raw_smoothing", action="store_true",
+                    help="apply the same median (size and causality) to the "
+                         "raw cyan SLEAP overlay that the corrector output "
+                         "receives. Use to isolate the model's own contribution "
+                         "to any visible lag from smoothing-kernel mismatch.")
     args = ap.parse_args()
     render(args.ckpt, args.rat, args.session, args.start_frame,
            args.n_frames, args.camera, args.fps,
            single_panel=args.single_panel,
            out_subdir_name=args.out_subdir,
-           smooth_size=args.smooth_size)
+           smooth_size=args.smooth_size,
+           smooth_causal=args.smooth_causal,
+           no_dannce=args.no_dannce,
+           match_raw_smoothing=args.match_raw_smoothing)
 
 
 if __name__ == "__main__":
