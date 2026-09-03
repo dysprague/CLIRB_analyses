@@ -99,13 +99,14 @@ CLINE_FULL = (0.34, 0.34, 0.37)
 # Keypoint pipeline
 # --------------------------------------------------------------------------- #
 def _causal_median_5_kp(rotated):
-    """5-frame CAUSAL median in rotated-keypoint space (matches the online rule /
-    single_session cell 6). Do NOT median-filter raw keypoints."""
-    pad = 4
-    padded = np.concatenate([np.repeat(rotated[:1], pad, axis=0), rotated], axis=0)
-    T = rotated.shape[0]
-    widx = np.arange(T)[:, None] + np.arange(5)[None, :]
-    return np.median(padded[widx], axis=1).astype(np.float32)
+    """Deprecated shim -- the canonical implementation lives in clirb.events.
+
+    Kept so existing imports keep working. New code should call
+    ev.causal_median_5_kp(rotated, warmup='online') directly; 'pad' is retained
+    here because these callers slice off their own leading context.
+    """
+    from clirb.events import causal_median_5_kp
+    return causal_median_5_kp(rotated, warmup="pad")
 
 
 def _reshape_dannce(dannce):

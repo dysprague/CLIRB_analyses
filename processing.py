@@ -74,91 +74,20 @@ def align_session_frames(opcon_events, n_frames_dannce, n_frames_sleap_cams):
 # ---------------------------------------------------------------------------
 # Template matching
 # ---------------------------------------------------------------------------
-def check_template_match(pc_buffer, pc_template, pc_template_bounds):
-    """
-    Check if PC values in buffer match the template within bounds.
-
-    Parameters
-    ----------
-    pc_buffer : (buffer_length, n_components) — recent PC values
-    pc_template : (template_length, n_components) — template
-    pc_template_bounds : (template_length, n_components) — per-timepoint bounds
-
-    Returns
-    -------
-    bool — True if all timepoints are within bounds
-    """
-    diff = np.abs(np.array(pc_buffer) - pc_template)
-    return np.all(diff <= pc_template_bounds)
-
-
-def check_template_match(pc_buffer, pc_template, pc_template_bounds):
-    """
-    Check if PC values in buffer match the template within specified bounds.
-    
-    Parameters:
-    - pc_buffer: Array of PC values, shape (buffer_length, n_components)
-    - pc_template: Template PC trajectory, shape (template_length, n_components)
-    - pc_template_bounds: Tolerance bounds for each PC dimension
-    
-    Returns:
-    - True if buffer matches template within bounds, False otherwise
-    """
-    pc_array = np.array(pc_buffer)
-    
-    # Check how many points fall outside the bounds
-    outside_bounds = (pc_array >= pc_template + pc_template_bounds) | (pc_array <= pc_template - pc_template_bounds)
-    
-    # If fewer than 3 points are outside bounds, consider it a match
-    num_outside = np.sum(outside_bounds)
-    
-    return num_outside <= 3, num_outside
-
-
-def get_template_match_indices(keys_pcs, pc_template, pc_template_bounds, refractory_frames=None):
-    """
-    Search through PC data to find frames matching a behavioral template.
-    
-    Parameters:
-    - keys_pcs: Full PC trajectory data, shape (n_frames, n_components)
-    - pc_template: Template PC trajectory to match, shape (template_length, n_components)
-    - pc_template_bounds: Tolerance bounds for matching, same shape as pc_template
-    - refractory_frames: Minimum frames between matches (default: template_length)
-    
-    Returns:
-    - match_idxs: List of frame indices where template matches were found
-    """
-    buffer = deque()
-    template_length = pc_template.shape[0]
-    match_idxs = []
-    num_outside = np.full(keys_pcs.shape[0], np.nan)
-    
-    # Set refractory period to template length if not specified
-    if refractory_frames is None:
-        refractory_frames = template_length
-    
-    last_match = -refractory_frames
-    
-    # Slide through all frames
-    for i in range(keys_pcs.shape[0]):
-        # Add current frame's PC values to buffer
-        buffer.append(keys_pcs[i, :])
-        
-        # Remove old frames that exceed template length
-        while buffer and len(buffer) > template_length:
-            buffer.popleft()
-        
-        # Wait until buffer is full before checking
-        if len(buffer) < template_length:
-            continue
-        
-        # Check if buffer matches template AND refractory period has passed
-        is_match, num_outside[i] = check_template_match(buffer, pc_template, pc_template_bounds)
-        if is_match and (i - last_match >= refractory_frames):
-            match_idxs.append(i)
-            last_match = i
-    
-    return match_idxs, num_outside
+# The matcher lives in clirb.events, which mirrors campy/behavior_rule.py.
+# This module previously carried two conflicting copies of check_template_match
+# (one all-within-bounds, one <=3-errors) and a hardcoded accepted_errors, which
+# is how the offline analysis drifted from the rig. Import, do not re-implement.
+#
+# NOTE: a template match is not a reward. To ask what the rig would have DONE,
+# use clirb.session_replay.replay_session, which also applies the interpolated-
+# frame, port-distance, refractory and task-context gates.
+from clirb.events import (  # noqa: F401,E402
+    check_template_match,
+    get_template_match_indices,
+    replay_online_rule,
+    windowed_out_of_bounds,
+)
 
 
 # ---------------------------------------------------------------------------

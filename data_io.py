@@ -5,11 +5,12 @@ import os
 import numpy as np
 import pandas as pd
 import scipy.io as sio
+import yaml
 from config import (
     DATA_ROOT, SESSION_CSV, DANNCE_CODE, SLEAP_CODE, SYNC_CODE,
     TONE_CODE, LICK_CODE, REWARD_ONSET_CODE, REWARD_WINDOW_EXPIRED_CODE,
     REWARD_COMPLETION_CODE, processed_path, dannce_path, sleap_path,
-    template_path,
+    template_path, calibration_path,
 )
 
 
@@ -188,3 +189,182 @@ def load_frame_mapping(rat, session):
     """Load frame_mapping.csv from SLEAP folder."""
     sp = sleap_path(rat, session)
     return pd.read_csv(os.path.join(sp, "frame_mapping.csv"))
+
+
+# ---------------------------------------------------------------------------
+# The online rule's session parameters
+# ---------------------------------------------------------------------------
+def load_session_config(rat, session):
+    """Parse the campy_config.yaml that campy copies into every session folder.
+
+    These are the values the rig actually ran with. Never hand-type them into a
+    notebook -- accepted_errors, min_port_distance and context_switch_time have
+    all changed between sessions.
+
+    Returns an events.OnlineParams plus the raw dict under key 'raw'.
+
+    CAVEAT: `template_file` is resolved from the config's `rat` and
+    `template_num` fields, which are hand-edited and go stale -- some sessions
+    carry another rat's name here while having actually run their own template.
+    It records INTENT. For what actually ran, use load_session_template() /
+    session_template_name(), which read the copy campy archives into the
+    session folder at shutdown.
+    """
+    from clirb.events import OnlineParams
+
+    path = os.path.join(sleap_path(rat, session), "campy_config.yaml")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no campy_config.yaml for {rat}/{session} at {path}; "
+            "the session predates config archiving and its online parameters "
+            "cannot be recovered")
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+
+    bp = cfg.get("behavior_params", {}) or {}
+    rp = bp.get("reward_params", {}) or {}
+    fps = float(bp.get("fps", cfg.get("frameRate", 20)))
+
+    tmpl = rp.get("template_file") or ""
+    tmpl_name = os.path.basename(tmpl)
+    if tmpl_name:
+        tmpl_name = tmpl_name.format(rat=cfg.get("rat", rat),
+                                     template_num=cfg.get("template_num", ""))
+
+    params = OnlineParams(
+        fps=fps,
+        accepted_errors=int(rp.get("accepted_errors", 3)),
+        min_port_distance=(None if bp.get("min_port_distance") is None
+                           else float(bp["min_port_distance"])),
+        task_id=int(cfg.get("task_id", 1)),
+        context_switch_time=float(bp.get("context_switch_time", 0.0)),
+        reward_threshold=(None if bp.get("reward_threshold") is None
+                          else int(bp["reward_threshold"])),
+        train_state=(None if bp.get("train_state") is None
+                     else int(bp["train_state"])),
+        template_file=tmpl_name or None,
+    )
+    params.raw = cfg
+    return params
+
+
+def session_template_name(rat, session):
+    """Filename of the template the session actually ran with.
+
+    campy copies the template npz into the session folder at shutdown, so this
+    is authoritative where campy_config.yaml's `rat`/`template_num` fields are
+    not. Returns None if no copy was archived.
+    """
+    sp = sleap_path(rat, session)
+    cands = sorted(f for f in os.listdir(sp)
+                   if f.endswith(".npz") and "template" in f and "tracker" not in f)
+    if len(cands) == 1:
+        return cands[0]
+    try:
+        want = load_session_config(rat, session).template_file
+    except FileNotFoundError:
+        return None
+    return want if want in cands else (cands[0] if cands else None)
+
+
+def load_session_template(rat, session):
+    """The template the session actually ran with.
+
+    campy copies the template npz into the session folder at shutdown, so
+    prefer that over templates/ -- the shared file may have been edited since.
+    """
+    sp = sleap_path(rat, session)
+    params = load_session_config(rat, session)
+    cands = sorted(f for f in os.listdir(sp)
+                   if f.endswith(".npz") and "template" in f and "tracker" not in f)
+    # Prefer the copy whose name matches the config, so a folder holding more
+    # than one template npz still resolves to the one the rig ran with.
+    if params.template_file in cands:
+        return dict(np.load(os.path.join(sp, params.template_file), allow_pickle=True))
+    if len(cands) == 1:
+        return dict(np.load(os.path.join(sp, cands[0]), allow_pickle=True))
+    if params.template_file is None:
+        raise FileNotFoundError(f"no template found for {rat}/{session}")
+    return load_template(rat, params.template_file)
+
+
+def load_template_tracker(rat, session):
+    """Per-session snapshots of the bounds actually in force (every 3 min)."""
+    path = os.path.join(sleap_path(rat, session), "template_tracker.npz")
+    return dict(np.load(path, allow_pickle=True))
+
+
+def load_water_port(rat, session):
+    """(x, y, z) water-port location from the session's archived calibration."""
+    path = os.path.join(calibration_path(rat, session), "water_port_location.npy")
+    return np.load(path).ravel()
+
+
+# ---------------------------------------------------------------------------
+# Camera-frame <-> processed-row mapping
+# ---------------------------------------------------------------------------
+def load_frame_alignment(rat, session, n_frames):
+    """Map processed queue items onto camera frames.
+
+    behavior_log.csv row j, frame_mapping.csv row j and camera frame
+    cam0_frame[j] are the SAME event -- the rig's `frame` column is a queue
+    counter, but frame_mapping carries the camera frame id alongside it. Frames
+    absent from cam0_frame were interpolated fills, which the rule appends to
+    its buffer but never checks for a reward.
+
+    Returns dict with:
+      cam0      : (n_rows,) camera frame per processed row
+      acq_row   : (n_rows,) max acquisition time across cameras, per row
+      is_real   : (n_frames,) bool
+      acq_frame : (n_frames,) acquisition time per camera frame; a fill
+                  inherits the time of the queue item that produced it, i.e.
+                  the NEXT real frame, matching the online loop.
+    """
+    df = load_frame_mapping(rat, session)
+    df.columns = [c.strip() for c in df.columns]
+    cam0 = df["cam0_frame"].to_numpy(dtype=int)
+    acq_cols = [c for c in df.columns if c.endswith("_acquisition_time")]
+    acq_row = df[acq_cols].to_numpy(dtype=float).max(axis=1)
+
+    keep = cam0 < n_frames
+    is_real = np.zeros(n_frames, dtype=bool)
+    is_real[cam0[keep]] = True
+    acq_frame = np.full(n_frames, np.nan)
+    acq_frame[cam0[keep]] = acq_row[keep]
+    # back-fill fills with the next real frame's time (the queue item they
+    # were generated in); then forward-fill any trailing gap.
+    idx = np.where(~np.isnan(acq_frame))[0]
+    if len(idx):
+        nxt = np.searchsorted(idx, np.arange(n_frames), side="left")
+        nxt = np.clip(nxt, 0, len(idx) - 1)
+        acq_frame = acq_frame[idx[nxt]]
+    return {"cam0": cam0, "acq_row": acq_row,
+            "is_real": is_real, "acq_frame": acq_frame}
+
+
+def load_online_rewards(rat, session, n_frames=None):
+    """Rewards the rig actually delivered, placed on camera frames.
+
+    Returns a DataFrame with camera_frame, queue_time, PC1, PC2, trigger_time.
+    Also returns, as .attrs['logged_pcs'], the per-camera-frame PC1/PC2 the rig
+    logged -- use it to assert an offline replay reproduces the online rule.
+    """
+    log = load_behavior_log(rat, session)
+    log.columns = [c.strip() for c in log.columns]
+    fm = load_frame_mapping(rat, session)
+    fm.columns = [c.strip() for c in fm.columns]
+    n = min(len(log), len(fm))
+    if len(log) != len(fm):
+        print(f"warning: {rat}/{session} behavior_log has {len(log)} rows, "
+              f"frame_mapping has {len(fm)}; aligning on the first {n}")
+    cam0 = fm["cam0_frame"].to_numpy(dtype=int)[:n]
+    log = log.iloc[:n].copy()
+    log["camera_frame"] = cam0
+
+    if n_frames is not None:
+        log = log[log["camera_frame"] < n_frames]
+    out = log[log["triggered"].astype(int) == 1][
+        ["camera_frame", "queue_time", "PC1", "PC2", "trigger_time"]
+    ].reset_index(drop=True)
+    out.attrs["logged_pcs"] = log[["camera_frame", "PC1", "PC2"]]
+    return out

@@ -40,11 +40,14 @@ ONLINE_MATCH_TOL = 5          # ± frames tolerance for online ↔ offline pairi
 # Loading + offline rule replay (lightweight copy of what the notebook does)
 # ---------------------------------------------------------------------------
 def _causal_median_5_kp(triang):
-    pad = 4
-    padded = np.concatenate([np.repeat(triang[:1], pad, axis=0), triang], axis=0)
-    T = triang.shape[0]
-    widx = np.arange(T)[:, None] + np.arange(5)[None, :]
-    return np.median(padded[widx], axis=1).astype(np.float32)
+    """Deprecated shim -- the canonical implementation lives in clirb.events.
+
+    Kept so existing imports keep working. New code should call
+    ev.causal_median_5_kp(rotated, warmup='online') directly; 'pad' is retained
+    here because these callers slice off their own leading context.
+    """
+    from clirb.events import causal_median_5_kp
+    return causal_median_5_kp(triang, warmup="pad")
 
 
 def _detect_rears(pc0):

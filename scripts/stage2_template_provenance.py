@@ -26,6 +26,10 @@ from clirb.spatial.geometry import ARENA, sector_index
 
 WIDEN_FACTOR = 2.5
 K_CLUSTERS = 10
+# Sweep default only. accepted_errors is per-session -- it lives in
+# reward_params['accepted_errors'] in each session's campy_config.yaml.
+# Use data_io.load_session_config(rat, session).accepted_errors when the
+# question is what a SPECIFIC session's rig did.
 ACCEPTED_ERRORS = 3
 W = 30
 SECTOR_W = 45          # match the builder-era coarse binning for readability
