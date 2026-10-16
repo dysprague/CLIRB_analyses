@@ -55,7 +55,7 @@ sys.path.insert(0, REPO); os.chdir(REPO)
 
 import session_cache as sc
 from clirb import events as ev, templates as tp
-from clirb import features as feat
+from clirb import features as cf
 from clirb.spatial import dual as du
 from clirb.spatial.geometry import ARENA, sector_index
 from corrector.world_alignment import fit_procrustes
@@ -108,7 +108,7 @@ def sector_balanced_sample(com_xy, n_per_sector=N_PER_SECTOR, rng=None):
     return np.array(sorted(samp), dtype=int)
 
 
-signed_angle_xy = feat.signed_angle_xy
+signed_angle_xy = cf.signed_angle_xy
 
 
 def wrap_deg(diff):
@@ -118,18 +118,29 @@ def wrap_deg(diff):
 # Feature definitions live in clirb.features (the single source of truth, §8s-§8z).
 # This script's reliability analysis consumes velocity as a 3-vector, not a scalar.
 def compute_features(kp):
-    return feat.compute_features(kp, velocity='vector')
+    return cf.compute_features(kp, velocity='vector')
 
 
 ANGLE_FEATURES = {'angle_lower_xy', 'angle_upper_xy', 'angle_mid_xy', 'angle_skip_xy',
                   'angle_torsion_xy', 'angle_body_head_xy', 'angle_mid_head_xy',
-                  'angle_torsion_ear_xy'}
+                  'angle_torsion_ear_xy',
+                  # absolute world heading: wraps like an angle, but its SIGN is
+                  # arena-orientation-dependent, so sign_agree_pct is NOT
+                  # interpretable as turn-direction agreement for this one.
+                  'heading_earhip'}
 VECTOR_FEATURES = {'com_velocity'}
+#: Signed scalars (Families A/B, added 2026-10-16): sign encodes turn direction,
+#: magnitude must NOT be wrapped (cumulative/rate values legitimately exceed 180).
+#: Reported with sign agreement, which is the gate metric for a direction split
+#: (§8z: turn-sign agreement, not RMSE, is what caps direction discrimination).
+SIGNED_FEATURES = set(cf.LATERAL_FEATURES) | {'yaw_rate', 'cum_heading_change'}
 UNITS = dict(snout_z='mm', ear_snout_mean_z='mm', ear_mean_z='mm',
             angle_lower_xy='deg', angle_upper_xy='deg', angle_mid_xy='deg', angle_skip_xy='deg',
             angle_torsion_xy='deg', angle_body_head_xy='deg', angle_mid_head_xy='deg',
             angle_torsion_ear_xy='deg',
             dist_snout_tb='mm', dist_ears_tb='mm', dist_spineF_tb='mm', dist_earmean_hipmean='mm',
+            lateral_offset_head='mm', hip_asym='mm', shoulder_hip_asym='mm', sagitta_spine='mm',
+            heading_earhip='deg', yaw_rate='deg/s', cum_heading_change='deg',
             com_velocity='mm/s')
 
 
@@ -197,6 +208,11 @@ def main():
                     acc[rat][feat]['sqsum'] += float((diff ** 2).sum())
                     acc[rat][feat]['n'] += diff.shape[0]
                     acc[rat][feat]['sign_agree'] += int((np.sign(a) == np.sign(b)).sum())
+                elif feat in SIGNED_FEATURES:
+                    diff = a - b                      # NOT wrapped: see above
+                    acc[rat][feat]['sqsum'] += float((diff ** 2).sum())
+                    acc[rat][feat]['n'] += diff.shape[0]
+                    acc[rat][feat]['sign_agree'] += int((np.sign(a) == np.sign(b)).sum())
                 else:
                     diff = a - b
                     acc[rat][feat]['sqsum'] += float((diff ** 2).sum())
@@ -214,7 +230,7 @@ def main():
             a = acc[rat][feat]
             rmse = np.sqrt(a['sqsum'] / max(a['n'], 1))
             row = dict(rat=rat, feature=feat, unit=UNITS[feat], rmse=rmse, n=a['n'])
-            if feat in ANGLE_FEATURES:
+            if feat in ANGLE_FEATURES or feat in SIGNED_FEATURES:
                 row['sign_agree_pct'] = 100.0 * a['sign_agree'] / max(a['n'], 1)
             rows.append(row)
     for feat in feat_names:
@@ -222,7 +238,7 @@ def main():
         n = sum(acc[rat][feat]['n'] for rat in acc)
         rmse = np.sqrt(sqsum / max(n, 1))
         row = dict(rat='pooled', feature=feat, unit=UNITS[feat], rmse=rmse, n=n)
-        if feat in ANGLE_FEATURES:
+        if feat in ANGLE_FEATURES or feat in SIGNED_FEATURES:
             sa = sum(acc[rat][feat]['sign_agree'] for rat in acc)
             row['sign_agree_pct'] = 100.0 * sa / max(n, 1)
         rows.append(row)

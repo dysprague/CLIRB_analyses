@@ -2192,6 +2192,116 @@ F35's scratchpad script.
 
 ---
 
+## 8aa. Two new feature families for "turnedness": heading beats every angle, but sign agreement still plateaus at ~85%
+
+§8z left the direction split weak and raised the question of whether the limit is the matching
+corridor or turn-sign *measurement*. Seven new features, designed from §8s's own geometry lessons,
+tested through the §8s reliability pass (now 195 sessions / 7.21M frames).
+
+**Family A — turn direction as a signed DISTANCE rather than an angle.** An angle divides
+positional noise by the lever arm; a perpendicular offset does not, so these should inherit the
+few-mm reliability of the distance family instead of the 17-26° noise of the angle family. All
+avoid Snout and TailBase. Sign convention: positive = leftward, for all seven.
+
+| feature | definition | RMSE | sign agree |
+|---|---|---|---|
+| `hip_asym` | ‖EarMean−HipR‖ − ‖EarMean−HipL‖ | **6.65 mm** | **81.9%** |
+| `shoulder_hip_asym` | ‖ShoulderR−HipR‖ − ‖ShoulderL−HipL‖ | 9.60 mm | 79.5% |
+| `sagitta_spine` | signed perp. distance of SpineM from the HipMean→EarMean chord | **5.51 mm** | 75.0% |
+| `lateral_offset_head` | signed perp. distance of EarMean from the HipMean→SpineM axis | 14.79 mm | 75.0% |
+
+**Family B — turning as a TEMPORAL quantity.** Nothing in §8s–§8z measured rotation over time;
+every turn candidate was instantaneous posture. Body axis = HipMean→EarMean, the longest
+well-tracked segment in the skeleton (the pair that won the stretch category at 8.06 mm).
+
+| feature | definition | RMSE | sign agree |
+|---|---|---|---|
+| `heading_earhip` | XY direction of (EarMean − HipMean) | **8.17°** | 98.1% † |
+| `cum_heading_change` | unwrapped heading change over the trailing 30 frames | 13.36° | **84.9%** |
+| `yaw_rate` | per-frame derivative of heading | 61.44°/s | **66.6%** |
+
+† `heading_earhip` is an absolute world heading, so its *sign* is arena-orientation-dependent and
+that 98.1% is **not** turn-direction agreement — it only says both modalities agree which half-plane
+the rat faces. Its meaningful number is the RMSE.
+
+### What worked
+
+**Heading is measured more than twice as precisely as any posture angle in this document: 8.17°,
+against 17.0° for the best spine angle (`angle_mid_xy`) and 19.5–26° for every turn candidate.**
+Consistent across rats (8.8/8.6/7.1). This is the lever-arm principle at full strength — the
+HipMean→EarMean axis is the longest well-tracked segment available, and measuring its *direction*
+rather than a short spine segment's curl buys a factor of two.
+
+**Integrating beats differentiating, decisively.** `cum_heading_change` and `yaw_rate` are the same
+underlying signal treated opposite ways: 84.9% vs **66.6%** sign agreement. `yaw_rate` is the worst
+feature ever tested here. The 30-frame integral suppresses the per-frame noise that differencing
+amplifies — and it is the only turn feature whose window shape differs between directions (a
+down-ramp vs an up-ramp), which is precisely what §8z found the height-only split lacked.
+
+**`cum_heading_change` dominates the previous best turn feature.** It ties `angle_body_head_xy` on
+sign agreement (84.9% vs 84.9%) with **45% lower RMSE** (13.4° vs 24.0°), and is consistent across
+rats (82.7/87.3/84.5). On the combined criteria it is now the best turn feature in the project.
+
+**Family A's premise holds for `hip_asym`** (6.65 mm, 81.9%) — better sign agreement than every
+angle except `angle_body_head_xy` and `cum_heading_change`, at distance-family precision. A
+difference of two well-measured distances, no angle anywhere.
+
+### What didn't, and why it matters
+
+**Low RMSE does not imply sign reliability.** `sagitta_spine` has the *lowest* RMSE of any new
+feature (5.51 mm) and among the *worst* sign agreement (75.0%). A rat's spine is mostly straight,
+so the sagitta hovers near zero, where a millimetre of noise flips the sign. This is the
+`angle_mid_xy` pathology (best angular RMSE, worst sign agreement) reappearing in distance form,
+and it confirms that **sign agreement, not RMSE, is the correct gate for a direction feature** —
+the two are close to uncorrelated across the 14 direction-bearing features now tested.
+
+**`lateral_offset_head` underperformed because of its axis choice** (14.79 mm, 75.0%). It uses
+HipMean→SpineM, a short axis whose own direction is noisy, and that noise rotates the perpendicular
+measurement. The longer-axis variant (HipMean→SpineF, or reusing the HipMean→EarMean axis) was not
+tried and is the obvious cheap fix.
+
+### The headline, and a correction to §8z's framing
+
+After §8z I argued that 84.7% turn-sign agreement was a ceiling specific to `angle_torsion_xy`, and
+that a better-conditioned feature should raise it. **That is not what happened.** Across 14
+direction-bearing features now spanning three structurally different formulations — spine-chain
+angles, signed distances, and integrated heading — sign agreement tops out at **~85%** and nothing
+clears it:
+
+| rank | feature | family | sign agree |
+|---|---|---|---|
+| 1 | `angle_body_head_xy` | angle | 84.9% |
+| 2 | `cum_heading_change` | B | 84.9% |
+| 3 | `hip_asym` | A | 81.9% |
+| 4 | `angle_skip_xy` | angle | 81.6% |
+| … | | | |
+| 14 | `yaw_rate` | B | 66.6% |
+
+Magnitude reliability improved a great deal (heading 8.2° vs 17–26°; `hip_asym` 6.7 mm). Direction
+agreement did not. **The ~85% ceiling now looks like a property of SLEAP-vs-DANNCE turn
+measurement itself, not of any one feature definition** — which supports §8z's original framing and
+retracts the caveat I attached to it.
+
+**The one measurement that could still overturn this, not yet done.** All of these are all-frames
+agreement, and most frames have the rat barely turning, where the sign is meaningless by
+construction and the two modalities are effectively coin-flipping. The number that matters for a
+reward rule is sign agreement **conditioned on a real turn** — e.g. |`cum_heading_change`| > 45°.
+That could be far above 85% while the unconditional figure stays pinned, and it is the number that
+decides whether direction-specific reward is viable. It needs one more stage21-style pass.
+
+### Scope note
+
+This rerun covers 195 sessions / 7.21M frames, versus 6.45M when §8s was computed (+11.8% — the
+cohort has grown). The original 16 features' RMSEs shift by ~0.1–3 units as a result; **the ranking
+is unchanged** (Spearman ρ = 0.994 against §8s, identical top-6 order), so every §8s conclusion
+stands. `ear_mean_z` remains the single best feature at 5.24 mm.
+
+Scripts: `clirb/features.py` (LATERAL_FEATURES, HEADING_FEATURES; sign conventions verified against
+synthetic left/right/rotating poses), `scripts/stage21_feature_reliability.py` (new SIGNED_FEATURES
+category: unwrapped RMSE plus sign agreement) → `stage21_feature_reliability.csv` (92 rows).
+
+---
+
 ## 9. Caveats
 
 - **n = 3 rats.** Every cross-rat pattern is descriptive. The within-rat, within-behaviour designs in
