@@ -40,6 +40,13 @@ variant (`axial2`), the result is a wash (axial2: precision 0.825 vs full23's 0.
 vs 0.762), not a win. Describe axial keypoints as "comparable to full23, trading precision for
 recall," not as an outright winner — see §8o before citing §8m's numbers.
 
+⚠️ **And §8p/§8q.** §8p ranked all 23 keypoints by SLEAP-DANNCE agreement in *egocentric*
+(SpineM-anchored) space, which entangles every keypoint's error with SpineM's own tracking
+disagreement. §8q redoes it in raw 3D world space (Procrustes-aligned per session, no shared
+reference point) and finds TailBase's poor §8p ranking (20th of 22) was substantially a confound
+artifact — it's mid-pack (14th) once corrected. Snout, however, is bad in both — a real finding.
+Use §8q's ranking, not §8p's, when deciding which keypoints to keep or drop.
+
 Run 2026-08-05 on all 151 locally cached sessions (R4/R5/R6), 16,315 rears, 136 dual-modality
 sessions. Plan: `SPATIAL_CONFOUND_PLAN.md`. Code: `clirb/`, `scripts/stage*.py`.
 Outputs: `results/spatial_confound/`. **Figures: `results/figures/spatial_confound/`**
@@ -63,9 +70,27 @@ Outputs: `results/spatial_confound/`. **Figures: `results/figures/spatial_confou
 | **F14** `F14_axial_sector_bias.png` | sector-bias range, full 23kp vs axial 9kp only (§8l) — ~35-38% reduction |
 | **F15** `F15_p_rewarded_by_sector.png` | P(rewarded\|DANNCE rear) by sector, 4 feature spaces (§8l) — superseded, see §8m/§8n |
 | **F16** `F16_p_rewarded_spread_summary.png` | sector-spread and pooled P(rewarded) summary bars (§8l) — superseded, see §8m/§8n |
-| **F17** `F17_overlap_overall.png` | aggregate + per-session-over-time precision/recall, with sample size (§8m) |
+| **F17** `F17_overlap_overall.png` | aggregate + per-session-over-time precision/recall, with real hysteresis-rear sample size split both/DANNCE-only/SLEAP-only/neither (§8m) |
 | **F18** `F18_overlap_by_sector.png` | precision/recall by sector × rat, DANNCE-ground-truthed (§8m) |
 | **F19** `F19_overlap_feature_comparison.png` | 6 feature spaces compared at full scale, incl. fair 2-PC axial2 — axial2 is a wash with full23, not a win; bodyrot alone loses (§8m/§8o) |
+| **F20** `F20_keypoint_mse_ranking.png` | all 23 keypoints ranked by SLEAP-DANNCE RMSE, egocentric space — superseded by F22, see §8q (§8p) |
+| **F21** `F21_keypoint_mse_by_rat.png` | same egocentric ranking, split by rat (§8p) |
+| **F22** `F22_keypoint_mse_world_ranking.png` | same ranking redone in raw 3D world space (Procrustes-aligned, no SpineM confound) — axial set looks better justified, not worse (§8q) |
+| **F23** `F23_keypoint_mse_world_by_rat.png` | world-space ranking split by rat — same order holds in all 3 (§8q) |
+| **F24** `F24_ranking_egocentric_vs_world.png` | bump chart, egocentric vs. world-space rank per keypoint — TailBase jumps 20th→14th, Snout stays bad in both (§8q) |
+| **F25** `F25_keypoint_mse_corrector_onoff.png` | per-keypoint RMSE, corrector ON vs. OFF — same ranking, systematically lower error when OFF (§8r) |
+| **F26** `F26_ranking_across_pipeline_versions.png` | keypoint rank across 3 pipeline eras — Snout worst in every one, TailBase never bad (§8r) |
+| **F27** `F27_feature_reliability.png` | 14 candidate online-matching features ranked by SLEAP-DANNCE RMSE/sign-agreement, world space + causal median filter (§8s) |
+| **F28** `F28_feature_subset_precision_recall.png` | precision/recall of every combo incl. turn/stretch triples, corrector-OFF/new-model sessions (§8t/§8u) |
+| **F29** `F29_best_features_by_rat.png` | top single-feature candidates' precision/recall, split by rat — hold up individually in all 3 (§8t) |
+| **F30** `F30_turn_stretch_by_rat.png` | adding turn/stretch to height, per rat — R6 recall is the weak point, especially for turn (§8u) |
+| **F31** `F31_ground_truth_size_by_feature.png` | feature-specific ground-truth event count per feature — balloons 7-20x for angle features, stable for height (§8v) |
+| **F32** `F32_stage22_vs_stage23_comparison.png` | precision/recall under shared-rearing vs. feature-specific ground truth, side by side — same conclusions either way (§8v) |
+| **F33** `F33_ground_truth_explosion_by_template.png` | ground-truth size after rebuild, by template — turning/locomotion explode to the refractory ceiling, rearing/rear+turn don't (§8x) |
+| **F34** `F34_precision_recall_by_template.png` | precision/recall of height alone vs. height+turn, across all 4 templates (§8x) |
+| **F35** `F35_directional_rear_turn.png` | detecting left- vs. right-turned rears separately (§8x) |
+| **F36** `F36_angle_pc23_correlation.png` | correlation of every turn angle with PC2/PC3 — best joint R² only ~0.25 (§8y) |
+| **F37** `F37_pc23_loadings_by_rat.png` | PC2/PC3 per-keypoint loadings by rat — one-sided limb+tail (PC2), snout pitch+forelimbs (PC3) (§8y) |
 
 ---
 
@@ -1197,10 +1222,28 @@ DANNCE-ground-truthing step, run across **all ~172 dual-modality sessions** inst
 2-feature baseline and the snout+bodyrot combo (matches the real rule's 3-of-60 ≈ 5% convention).
 
 **Baseline (full 23kp) accuracy is now believable, not inflated** (F17): precision 0.79–0.87,
-recall 0.74–0.79 across the three rats, pooled over 64,776 events. F17 also plots, per session,
-the total ground-truth rear count and total SLEAP-match count behind every precision/recall point
-— several early sessions (e.g. R4's first few) run on samples as small as 5-15 events, which is
-worth keeping in mind when reading the noisiest stretches of the time series.
+recall 0.74–0.79 across the three rats, pooled over 64,776 events.
+
+**Sample-size panel corrected (2026-09-03).** F17's bottom row originally plotted total
+ground-truth-match count and total SLEAP-match count — two *match-event* tallies from independent
+template-matching passes, not a real behavioral denominator, which is why SLEAP's count sometimes
+exceeded the "rear" count. Fixed to plot the actual denominator that matters: real,
+hysteresis-detected rears (`ev.detect_rears` run directly on the DANNCE PC0 trajectory, offset-
+corrected sector-balanced per session exactly as `stage7_dannce_rears.py` already does — never
+touching any template match), split into **exclusive** per-rear categories via `ev.rear_matched`
+against the full23 SLEAP- and DANNCE-side match sets: both, DANNCE-only, SLEAP-only, or neither.
+
+**This surfaced a new, previously invisible number: roughly half of all real rears are matched by
+neither modality.** Pooled: R4 33% both / 9% DANNCE-only / 7% SLEAP-only / **50% neither**; R5 33%
+/ 12% / 5% / **50%**; R6 28% / 7% / 8% / **57%**. The corridor-matching process (a specific 30-frame
+PC0/PC1 shape, refractory-gated) is far more selective than a raw height-threshold hysteresis
+detector — most real rears simply aren't the right *shape* to pass either modality's corridor, not
+just occasionally missed by one modality relative to the other. This doesn't change the
+precision/recall numbers above (those were always computed correctly, over match events only) but
+it does mean **precision/recall in this section characterize agreement between the two modalities
+conditional on a corridor-shaped rear, not "what fraction of all rearing behavior gets rewarded."**
+Scripts: `stage18_dannce_ground_truth_overlap.py` → `stage18_rear_overlap.csv` (17,846 real rears),
+`stage18_rear_session_summary.csv`.
 
 **Real sector-dependence survives this methodology too** (F18): every rat shows genuine
 sector-to-sector swings in both precision and recall (e.g. R6's precision drops to ~0.59 in one
@@ -1340,6 +1383,815 @@ Scripts: `scripts/stage18_dannce_ground_truth_overlap.py` (now `FEATURES = ['ful
 
 ---
 
+## 8p. Per-keypoint SLEAP-vs-DANNCE ranking: the axial 9kp set is not uniformly the best-tracked
+
+⚠️ **Superseded in part by §8q.** This section's distances are computed in the egocentric,
+SpineM-anchored, heading-rotated space (the online rule's own pipeline) — which means every
+keypoint's "error" here is entangled with how well SLEAP and DANNCE agree on SpineM's position and
+on the heading angle, not just that keypoint's own tracking. §8q redoes this in raw 3D world space
+(no shared reference point) and finds a materially different, more clear-cut story for TailBase in
+particular. Read §8q before citing TailBase's ranking from this section.
+
+A direct question: rank all 23 keypoints by how well SLEAP and DANNCE agree on where they are.
+Per dual-modality session, both modalities are put through the exact pipeline the online rule
+itself uses (z-flip SLEAP only → egocentric normalize → 5-frame causal median —
+`ev.project_session_to_pcs`'s `rotated_med` output, the same array axial/snout_z/bodyrot are built
+from in §8l–§8o), then per-keypoint squared Euclidean distance is pooled over every frame of every
+session (no rear-conditioning) — **6.45M frames across all 172 dual-modality sessions.**
+
+**Data-quality catch first.** One session, `R4/2026_08_28_2` (4,177 frames, unusually short —
+truncated), had a whole-session RMSE of 8,364mm — physically impossible, a gross misalignment, not
+real tracking error — and was dragging R4's pooled numbers by 2 orders of magnitude (Snout RMSE
+1203mm vs. a sane ~24mm). Added an automatic guard (exclude any session with overall RMSE >100mm;
+every one of the other 171 sessions is 8–32mm) and excluded it. `SpineM` is also excluded from the
+ranking (not the CSV) — it's the egocentric-normalization origin, so its RMSE is exactly 0mm by
+construction, not a real agreement measurement.
+
+**Pooled ranking (6.45M frames, lower = better SLEAP/DANNCE agreement):**
+
+| rank | keypoint | RMSE (mm) | in axial 9kp set? |
+|---|---|---|---|
+| 1 | SpineF | 7.75 | yes |
+| 2 | ShoulderL | 9.87 | no |
+| 3 | ShoulderR | 9.94 | no |
+| 4 | EarR | 10.99 | yes |
+| 5 | EarL | 11.34 | yes |
+| 6 | SpineL | 11.37 | yes |
+| 7 | ElbowR | 12.07 | no |
+| 8 | ElbowL | 12.54 | no |
+| 9 | HipL | 12.54 | yes |
+| 10 | HipR | 13.05 | yes |
+| 11–19 | Knees, Wrists, Ankles, Feet, HandL | 14.2–19.1 | no |
+| 20 | TailBase | 19.50 | yes |
+| 21 | Snout | 24.58 | yes |
+| 22 | HandR | 25.16 | no |
+
+Same ordering holds within all 3 rats individually (F21) — this is a robust, cross-animal pattern,
+not noise. One rat-specific wrinkle: R4's HandR (33.8mm) is notably worse than R5/R6's (~20mm,
+~18mm), the single biggest per-keypoint cross-rat discrepancy in the table.
+
+**This complicates the axial-9kp mitigation candidate (§8h/§8l/§8m/§8o).** The axial set (Snout,
+EarL, EarR, SpineF, SpineM, SpineL, TailBase, HipL, HipR) was chosen by a *different* criterion —
+lowest 2D image-plane aspect-dependent amplitude (§8h) — not by 3D SLEAP/DANNCE agreement. By
+**this** metric it's a mixed bag, not a uniformly-good set: it contains the single best-agreeing
+keypoint (SpineF) and 5 of the top 10, but it also contains 2 of the 3 *worst*-agreeing keypoints
+in the entire skeleton — **TailBase (20th of 22) and Snout (21st of 22)** — while several limb
+keypoints the axial set *drops* (both shoulders, both elbows) agree better between modalities than
+either. Aspect-amplitude and cross-modality 3D agreement are evidently measuring different failure
+modes (viewing-angle-dependent 2D detection bias vs. absolute 3D triangulation/tracking
+disagreement) — a keypoint can be low on one and high on the other. Worth factoring in before
+finalizing axial keypoints as the online-rule feature: if the goal is "keypoints SLEAP and DANNCE
+agree on," a set built from *this* ranking (e.g. swap Snout/TailBase for the shoulders/elbows)
+would be a meaningfully different, and by this metric better-justified, candidate.
+
+Scripts: `scripts/stage19_keypoint_mse.py` → `stage19_keypoint_mse.csv`; figures
+`make_figure_stage19.py` → F20 (pooled ranking), F21 (per-rat).
+
+---
+
+## 8q. Redone in raw 3D world space — the SpineM confound was real, and it mattered
+
+User's objection to §8p: every keypoint's egocentric coordinate is `raw_position - SpineM_position`,
+then rotated by a heading angle derived from the pose. If SLEAP and DANNCE disagree on *where
+SpineM is* (or on the heading-defining keypoints), that disagreement is baked into *every other
+keypoint's* apparent error — and SpineM itself is trivially 0mm by construction (it *is* the
+egocentric origin), which is a definitional artifact, not a result.
+
+**Fix: align DANNCE's world frame onto SLEAP's ONCE PER SESSION** via a rigid (rotation + isotropic
+scale + translation) Procrustes fit — the same "camera-rig calibration" convention already used
+elsewhere in this project for a world-space SLEAP/DANNCE comparison (`stage9b_m6_test.py`,
+`stage14a`, `stage15`, `corrector/evaluate_world.py`): a sector-balanced pooled sample of frames
+(up to 300/sector, matching §9's own convention) feeds an iteratively-reweighted, outlier-trimmed
+Procrustes fit (`robust_proc`, 5 iterations, drop the worst 30% each round), then that **one**
+fitted transform is applied to every frame of that session. This removes only the rigid
+camera-to-camera calibration offset between the two rigs — unlike egocentric normalization, it
+never references SpineM or any other single keypoint, so no keypoint's error can leak into another's.
+
+**Sanity-checked the fits before trusting them:** per-session fit residual 8.8–11.8mm and scale
+0.993–0.999 (should be ≈1.0) for essentially every one of 172 sessions — except the *same* corrupted
+session §8p's guard also caught, `R4/2026_08_28_2` (fit scale 0.27, residual 1193mm — an immediate,
+obvious tell), excluded the same way.
+
+**Pooled world-space ranking (6.45M frames, lower = better agreement):**
+
+| rank | keypoint | RMSE (mm) | axial set? | egocentric rank (§8p) |
+|---|---|---|---|---|
+| 1 | SpineM | 12.57 | yes | *(excluded there — was 0 by construction)* |
+| 2 | SpineL | 13.00 | yes | 6 |
+| 3 | SpineF | 13.43 | yes | 1 |
+| 4 | HipL | 13.58 | yes | 9 |
+| 5–6 | ShoulderL/R | 14.1–14.3 | no | 2–3 |
+| 7–10 | ElbowR/L, EarR/L | 15.3–15.6 | mixed | 4,5,7,8 |
+| 11–13 | KneeL/R, HipR | 16.0–16.3 | mixed | 10–12 |
+| 14 | TailBase | 16.37 | yes | **20** |
+| 15–18 | AnkleL/R, WristL/R | 16.5–18.2 | no | 13,14,17,18 |
+| 19–20 | FootL, HandL | 22.2–23.1 | no | 16,19 |
+| 21 | Snout | 26.73 | yes | 21 |
+| 22–23 | FootR, HandR | 28.6–28.7 | no | 15,22 |
+
+Same qualitative pattern (spine/hip/shoulder core best, hands/feet/snout worst) holds within all 3
+rats individually (F23).
+
+**The SpineM confound was real, and it mattered most for TailBase.** F24 compares egocentric vs.
+world-space rank directly: most keypoints move by only a few ranks (noise), but **TailBase jumps
+from 20th (2nd-worst) to 14th (solidly mid-pack)** — its poor showing in §8p was substantially an
+artifact of the SpineM/heading confound, not real tracking disagreement. HipL and SpineL similarly
+improve (9→4, 6→2). **Snout, by contrast, stays bad in both spaces (21st in both)** — confirming
+Snout's poor SLEAP/DANNCE agreement is a genuine, robust finding, not a confound artifact.
+
+**Revised bottom line for the axial-9kp mitigation candidate:** in world space, the axial set looks
+*better* justified than §8p suggested, not worse — it now holds 4 of the top 4 spots (SpineM,
+SpineL, SpineF, HipL) and 6 of the top 11, with **only Snout as a genuine, confirmed liability**.
+TailBase, previously flagged as a problem in §8p, is not one. If refining the axial feature set,
+the one substantive change this ranking supports is considering whether to drop **Snout**
+specifically (worst-or-near-worst in both spaces) — not TailBase.
+
+Scripts: `scripts/stage20_keypoint_mse_worldspace.py` → `stage20_keypoint_mse_world.csv`,
+`stage20_session_fits.csv` (per-session fit diagnostics); figures `make_figure_stage20.py` → F22
+(pooled), F23 (per-rat), F24 (egocentric-vs-world rank comparison).
+
+---
+
+## 8r. Is §8q robust across pipeline versions, or is it one bad configuration?
+
+Direct question: split §8q's world-space ranking by which **SLEAP model**, whether the **online
+corrector** was active, and which **camera calibration** was in effect, using each session's own
+`sleap/campy_config.yaml` (`process_params.model_path`, `behavior_params.corrector_ckpt`,
+`behavior_params.calibration_path`) — no re-running the Procrustes fits, just re-grouping §8q's
+already-computed per-session, per-keypoint sums.
+
+**What actually varies in this dataset:** only 2 SLEAP models (old, n=2298 training frames — 139
+sessions; new, n=9975 — 32 sessions) and 3 calibrations (`2026_05_04` — 171 sessions, the default;
+`2026_07_20` — 4; `2026_08_28` — 2). The corrector switches off on 2026-07-29, at the **same time**
+as the model swap: **model and corrector status are almost completely confounded** (old
+model+corrector-ON: 133 sessions; new model+corrector-OFF: 32; the only exception is a tiny
+6-session "bridge" — the very first session(s) per rat, 2026-06-05, before the corrector was ever
+turned on: old model+corrector-OFF). The two non-default calibrations only ever occur within the
+new-model/corrector-OFF era, so calibration's own effect can't be cleanly isolated from era either
+— though within that era, all 3 calibrations independently produce a similar ranking, which is at
+least reassuring.
+
+**The ranking is broadly robust — Spearman rank correlation 0.82–0.88 across every split tested:**
+corrector ON vs. OFF ρ=0.830 (p=1e-6); old model vs. new model ρ=0.824 (p=1e-6); the tiny bridge
+group vs. the main old+ON group ρ=0.793; the bridge group vs. new+OFF ρ=0.882. Same qualitative
+story (spine/shoulder/hip core best, hands/feet/snout worst) holds in every stratum (F26).
+
+**But it is not merely a re-labeling — there's a real, systematic shift in absolute error.**
+Corrector-OFF (= new model) sessions show **lower** RMSE than corrector-ON (= old model) sessions
+for nearly every single keypoint (F25) — e.g. SpineF 14.4mm (ON) vs. 8.6mm (OFF); Snout 27.6mm (ON)
+vs. 23.1mm (OFF). The newer, more-trained SLEAP model (n=9975 vs. n=2298 frames) evidently achieves
+tighter agreement with DANNCE **on its own, without the corrector's help**, than the older model
+does even *with* the corrector actively trying to map it toward DANNCE. This is a new, independent
+finding, not something the rest of this document previously established.
+
+**Snout is the single most robust finding in this whole investigation.** It ranks 21st, 22nd, or
+23rd of 23 — worst or second/third-worst — in **every one of the 10 strata tested**, including the
+tiny 6-session bridge group (23rd/23, its single worst showing anywhere). There is no version of
+the pipeline in which Snout looks good. This is not an artifact of one bad calibration, one SLEAP
+model, or the corrector being on or off.
+
+**TailBase is more version-dependent, but never bad.** Its rank moves: 15th (old model, corrector
+ON, the bulk of the data) → 9th (new model, corrector OFF) → 2nd (the tiny old-model+OFF bridge
+group, 144k frames — noisy, treat cautiously) → 8th/9th (either non-default calibration). It never
+drops below mid-pack in any stratum, which is the load-bearing claim from §8q (that TailBase's poor
+egocentric-space ranking, §8p, was a confound artifact) — that conclusion holds up across every
+pipeline version, even though the *exact* rank varies more than Snout's does. The bridge group's
+ranking correlates more strongly with the new-model/corrector-OFF group (ρ=0.882) than with the
+old-model/corrector-ON group it shares its model with (ρ=0.793) — weak evidence (small n) that
+corrector status, not SLEAP model version per se, is the bigger driver of the shift.
+
+**Bottom line for the axial-9kp mitigation candidate:** unaffected by this check. Snout's liability
+and the rest of the axial set's general strength both hold up across every pipeline version tested
+— this isn't a result that depends on which slice of the cohort happens to dominate the pooled
+numbers.
+
+Scripts: `scripts/stage20b_stratify_by_pipeline_version.py` → `stage20b_session_metadata.csv`,
+`stage20b_stratified_ranking.csv`; figures `make_figure_stage20b.py` → F25 (ON/OFF grouped bars),
+F26 (3-stratum rank progression, Snout/TailBase highlighted).
+
+---
+
+## 8s. Reliability of 14 candidate interpretable online-matching features
+
+Moving from ranking individual keypoints (§8p–§8r) to ranking hand-designed *features* — the
+actual building blocks a redesigned online rule would use. Same infrastructure as §8q/§8r (one
+rigid+scale Procrustes fit per session, sector-balanced sample, mapping DANNCE into SLEAP's world
+frame, same corrupted-session guard), plus one addition: **both modalities' keypoints are run
+through the same 5-frame causal median filter the online rule itself applies**
+(`ev.causal_median_5_kp`, `warmup='online'`) before any feature is computed — these are candidates
+for the *online* rule specifically, so they're evaluated exactly as it would actually see them,
+not on raw unfiltered positions.
+
+**Fourteen features** (4 more added 2026-09-09, specifically to cover body *turn* and
+*crouch/stretch* — see the motivating discussion after the table), computed identically from each
+modality's filtered keypoints, then compared frame-by-frame over all 6.45M frames:
+
+| feature | definition | RMSE | unit |
+|---|---|---|---|
+| `ear_mean_z` | mean Z of {EarL, EarR} (no snout) | **5.41** | mm |
+| `ear_snout_mean_z` | mean Z of {Snout, EarL, EarR} | 6.93 | mm |
+| `dist_earmean_hipmean` | 3D distance, mean(EarL,EarR) ↔ mean(HipL,HipR) | **8.15** | mm |
+| `dist_spineF_tb` | 3D distance, SpineF ↔ TailBase | 8.84 | mm |
+| `dist_ears_tb` | 3D distance, mean(EarL,EarR) ↔ TailBase | 9.49 | mm |
+| `snout_z` | Snout Z height | 12.73 | mm |
+| `dist_snout_tb` | 3D distance, Snout ↔ TailBase | 15.67 | mm |
+| `angle_mid_xy` | signed XY angle, (SpineM−SpineL)→(SpineF−SpineM) | 16.63 | deg |
+| `angle_torsion_xy` | signed XY angle, (HipR−HipL)→(ShoulderR−ShoulderL) | 17.85 | deg |
+| `angle_lower_xy` | signed XY angle, (SpineM−TailBase)→(SpineF−SpineM) | 18.04 | deg |
+| `angle_upper_xy` | signed XY angle, (SpineF−SpineM)→(Snout−SpineF) | 20.49 | deg |
+| `angle_skip_xy` | signed XY angle, (SpineF−SpineL)→(Snout−SpineF) | 20.57 | deg |
+| `angle_body_head_xy` | signed XY angle, (SpineF−TailBase)→(EarMean−SpineF) | 23.03 | deg |
+| `com_velocity` | 3D velocity of the 23-keypoint center of mass | 75.67 | mm/s |
+
+Angle features additionally report **directional (sign) agreement** — the fraction of frames where
+SLEAP and DANNCE agree on which way the segment is curling (both positive or both negative):
+`angle_body_head_xy` **85.6%**, `angle_torsion_xy` **81.9%**, `angle_skip_xy` **81.4%**,
+`angle_lower_xy` **79.7%**, `angle_upper_xy` **76.2%**, `angle_mid_xy` **73.0%** (chance ≈50%). All
+numbers hold consistently across all 3 rats individually (F27).
+
+**Motivation for the 4 newest features (`angle_torsion_xy`, `angle_body_head_xy`,
+`dist_spineF_tb`, `dist_earmean_hipmean`):** §8t's `ear_mean_z` result only detects *rears* — it
+says nothing about which way the animal is turned or how crouched/stretched it is. Two more
+feature families were designed specifically to fill those gaps, deliberately avoiding Snout and
+TailBase (the two worst-tracked keypoints, §8p–§8r) and favoring long lever arms (§8s's own
+"skip vs. upper" finding: longer segments are less sensitive to positional noise):
+- **Turn:** `angle_torsion_xy` measures body *torsion* — the angle between the hip axis and the
+  shoulder axis — using four individually well-tracked keypoints and no spine/snout/tailbase at
+  all. `angle_body_head_xy` extends the existing spine-chain family with a longer body axis
+  (SpineF−TailBase instead of SpineF−SpineM) and an ear-based (not snout-based) head vector.
+- **Crouch/stretch:** `dist_spineF_tb` is a "core torso length" that swaps Snout for SpineF in the
+  existing `dist_snout_tb`. `dist_earmean_hipmean` is a head-to-hip span that avoids Snout *and*
+  TailBase entirely.
+
+**Both new distance features beat every previous distance feature — `dist_earmean_hipmean` (8.15mm)
+is now the single best stretch/distance feature tested**, ahead of `dist_spineF_tb` (8.84mm) and
+the previous best, `dist_ears_tb` (9.49mm) — confirming that avoiding both worst-tracked keypoints
+compounds the benefit rather than just avoiding one. **`angle_torsion_xy` has the best sign
+agreement of any angle that doesn't touch Snout (81.9%)** — direct support for the "long,
+well-tracked lever arms" design principle applied to a genuinely new geometric quantity (torsion,
+not spine curl). **`angle_body_head_xy` is a real trade-off, not a clean win:** best sign agreement
+of *any* angle tested (85.6%) but the worst RMSE (23.0°) — direction is more stable than magnitude
+when Snout sits at the end of a long lever arm, an interesting asymmetry not seen in the shorter
+spine-chain angles.
+
+**`ear_mean_z` (dropping snout entirely) is the single best feature tested — better than the
+3-point average that still includes snout.** 5.41mm vs. `ear_snout_mean_z`'s 6.93mm: adding Snout
+back into the average makes it *worse*, not better — confirming Snout is close to pure noise here,
+not merely a weaker signal that dilutes a good one.
+
+**The ranking traces directly back to §8p–§8r's per-keypoint findings — Snout drags down every
+feature it touches.** `snout_z` (12.7mm) vs. `ear_mean_z` (5.4mm) — over **2× worse**;
+`dist_snout_tb` (15.7mm) vs. `dist_ears_tb` (9.5mm) — 65% worse; `angle_upper_xy` (Snout as an
+endpoint, 20.5°/76.2%) worse on both metrics than `angle_lower_xy` (no Snout, 18.0°/79.7%). This is
+exactly what §8p–§8r already established (Snout is the single worst-tracked keypoint in the
+skeleton, robustly across every pipeline version) — it isn't a new, independent finding so much as
+a confirmation that keypoint-level reliability propagates directly into feature-level reliability.
+
+**A subtler geometric wrinkle: `angle_skip_xy` has *better* sign agreement than `angle_upper_xy`
+(81.4% vs. 76.2%) despite both using Snout as an endpoint of the second vector.** The difference is
+the *first* vector: `angle_skip_xy` uses the longer SpineF−SpineL segment, `angle_upper_xy` the
+shorter SpineF−SpineM segment. A longer lever arm is less sensitive to a few mm of positional
+noise, so its direction is more stable — the same geometric-amplification logic below, but working
+in Snout's favor here because the *other* vector in the pair happens to be more forgiving.
+
+**Angle features are the noisiest category regardless of which keypoints they're built from** —
+even `angle_mid_xy`/`angle_lower_xy`, which avoid Snout entirely and use only well-tracked
+spine/hip-adjacent keypoints, still have meaningfully worse *relative* error than the
+distance/height features. This is a geometric amplification effect, not a tracking-quality effect:
+the spine segments involved are short (a few cm), so the same few-mm positional noise that gives
+excellent *distance* agreement translates into a much larger *angular* error when divided by a
+short lever arm. Any online rule considering a signed-angle feature should budget for both a real
+RMSE (~17–21°) and non-trivial sign-flip risk (~19–27% of frames), not just the RMSE.
+
+**Practical ranking for online-rule prototyping, most to least reliable:** `ear_mean_z` >
+`ear_snout_mean_z` > `dist_earmean_hipmean` ≈ `dist_spineF_tb` > `dist_ears_tb` > `snout_z` ≈
+`dist_snout_tb` > `angle_mid_xy` ≈ `angle_torsion_xy` ≈ `angle_lower_xy` ≈ `angle_upper_xy` ≈
+`angle_skip_xy` ≈ `angle_body_head_xy` > `com_velocity` (velocity's raw mm/s RMSE isn't directly
+comparable to the others' units, but at ~76mm/s against a typical median speed of ~40mm/s the
+*relative* noise is substantial). `ear_mean_z` (height), `dist_earmean_hipmean` (stretch), and
+`angle_torsion_xy` (turn) are the standout one-per-category candidates carried forward into §8u.
+
+Scripts: `scripts/stage21_feature_reliability.py` → `stage21_feature_reliability.csv`,
+`stage21_session_fits.csv`; figure `make_figure_stage21.py` → F27.
+
+---
+
+## 8t. Can a small, interpretable feature set hit ≥80% precision AND ≥80% recall?
+
+Direct test of the practical question §8s was building toward: rerun the full stage18/§8m-style
+DANNCE-ground-truthed overlap pipeline (Pass-1 SLEAP → rebuild DANNCE-only template → ground-truth
+DANNCE match set → rebuild both templates from the stage21 world-space features → match
+independently → pair within 10 frames), but with the stage21 features standing in for stage18's
+egocentric-PCA feature spaces, and testing **every 1- and 2-feature combination** (10 singles + 45
+pairs = 55 total) of the 10 candidates from §8s (`speed` = magnitude of `com_velocity`, since a
+vector can't be combined with scalars in a shared corridor-matching trajectory).
+
+**Restricted to the corrector-OFF, new-SLEAP-model era only** (§8r's most-accurate stratum — 33 of
+the ~38 such sessions pass the world-space fit guard; the same corrupted session §8p/§8q/§8r/§8s
+already flagged is excluded here too, independently, by the same guard) — per the explicit request
+to focus on the tracking configuration already known to be more reliable, not average it in with
+the noisier corrector-ON majority.
+
+**Result: even a single feature comfortably clears both targets.**
+
+| combo | precision | recall | meets 80/80? |
+|---|---|---|---|
+| `ear_mean_z` | **93.1%** | **95.9%** | ✅ |
+| `ear_snout_mean_z` | 93.3% | 95.1% | ✅ |
+| `ear_snout_mean_z` + `ear_mean_z` | 92.2% | 93.5% | ✅ |
+| `snout_z` + `ear_snout_mean_z` | 90.5% | 93.5% | ✅ |
+| `snout_z` | 90.9% | 93.2% | ✅ |
+| `speed` (velocity magnitude) | 83.6% | 88.0% | ✅ |
+
+**19 of the 55 combinations tested clear both thresholds** (F28); the best are all built from
+height features, with `ear_mean_z` alone — already established in §8s as the single most reliable
+feature (5.4mm RMSE) — the single best performer of any combination tested, 1- or 2-feature. Adding
+a second feature to it never helps: every pairing of `ear_mean_z` with something else scores lower
+on at least one of precision/recall than `ear_mean_z` alone (F28's "1-feature" cluster sits above
+its own best "2-feature" pairings). **This holds within every rat individually, not just pooled**
+(F29): `ear_mean_z` alone scores R4 94.4%/94.6%, R5 94.0%/96.6%, R6 87.0%/95.7% (precision/recall)
+— R6's precision is the weakest of the three but still 7 points clear of the 80% bar.
+
+**Angle features and `dist_ears_tb`/`dist_snout_tb` combinations mostly fall short of 80/80 in this
+role** (bottom two-thirds of F28) — consistent with §8s's RMSE ranking (angles are the noisiest
+category by construction) but worth noting explicitly: a feature being individually well-tracked
+(§8s) doesn't automatically make it good at the specific job of *matching a 30-frame corridor*,
+since that also depends on how much the feature's own within-behavior variance (which sets the
+corridor width) trades off against its cross-modality noise.
+
+**Practical recommendation: a single feature, `ear_mean_z` (mean Z-height of the two ears, no
+snout), already meets the target with meaningful headroom (93%/96% vs. the 80%/80% ask) in the
+corrector-OFF/new-model tracking regime.** There is no evidence a larger, less interpretable
+feature set is needed for this specific regime — the "trade precision for recall" ask is already
+satisfied by construction (recall consistently 2-4 points above precision across the top
+candidates). The one caveat: this result is specific to the higher-accuracy tracking era (§8r) by
+explicit request; it has not been tested against the corrector-ON majority of the historical
+cohort, where §8s's absolute RMSEs are roughly double (e.g. `ear_mean_z`-equivalent height features
+were ~2x noisier under corrector-ON in §8r's stratified check) and precision/recall would be
+expected to be correspondingly lower, closer to stage18/§8o's full23 baseline (0.79-0.87).
+
+Scripts: `scripts/stage22_feature_subset_matching.py` → `stage22_combo_results.csv` (1,595
+combo-session rows at the time of this section; extended in §8u), `stage22_combo_summary.csv`;
+figures `make_figure_stage22.py` → F28 (precision/recall scatter — updated in §8u to include the
+turn/stretch triples, so the original 55-combo-only version is not separately preserved), F29
+(per-rat consistency for the top 3 single features).
+
+---
+
+## 8u. Adding turn or crouch/stretch to the height corridor: a methodological trap, not a dead end
+
+Direct follow-up to §8t: the user wants 1-2 more features that say something about **body turn**
+(left/right) and **crouch/stretch**, to combine with a height feature for a richer online rule.
+§8s's `angle_torsion_xy` (hip-axis vs. shoulder-axis, no Snout/TailBase/short-spine — the
+best-motivated turn candidate by raw reliability) and `dist_earmean_hipmean`/`dist_spineF_tb` (the
+two best stretch candidates) were added, then re-ran §8t's exact combo search — now 129 combos:
+all 14 singles, all 91 pairs, plus 24 targeted `ear_mean_z` + turn + stretch triples.
+
+**Result: turn features mostly wreck recall when forced into the same corridor as height, and the
+feature that was *most reliable by raw RMSE* (`angle_torsion_xy`) is the worst offender.**
+
+| combo | precision | recall | meets 80/80? |
+|---|---|---|---|
+| `ear_mean_z` (height alone, from §8t) | 93.1% | 95.9% | ✅ |
+| `ear_mean_z` + `dist_earmean_hipmean` (best stretch) | 93.6% | 83.7% | ✅ (barely, R6 78%) |
+| `ear_mean_z` + `angle_skip_xy` (best-surviving turn) | 90.6% | 84.4% | ✅ (barely, R6 75%) |
+| `ear_mean_z` + `angle_torsion_xy` (best turn by §8s RMSE) | 94.4% | **67.3%** | ❌ |
+| `ear_mean_z` + `angle_body_head_xy` | 92.1% | 66.5% | ❌ |
+| `ear_mean_z` + `angle_skip_xy` + `dist_earmean_hipmean` (height+turn+stretch) | 91.0% | 80.1% | ✅ (barely; R6 recall 67.6%) |
+
+**Only 2 of 24 height+turn+stretch triples clear 80/80 pooled, and both use `angle_skip_xy`** (the
+one turn candidate that still touches Snout) **— never `angle_torsion_xy` or `angle_body_head_xy`**,
+despite those being the more carefully-designed, better-tracked candidates by §8s's own RMSE
+ranking. Standalone, `angle_torsion_xy` scores just 54.0%/41.6% and `angle_body_head_xy` 44.7%/44.2%
+— both far worse than any other feature tested alone (F28).
+
+**Why the more "reliable" feature performs worse here — this is about ground-truth anchoring, not
+feature quality.** §8t/§8u's precision/recall pipeline is built entirely around **rearing**: the
+ground-truth anchor set comes from the real production template, which defines "the behavior" as a
+specific height/posture trajectory. Adding a feature to that corridor only helps if the feature is
+itself *characteristic of rearing* — i.e., has a consistent, narrow-enough value during genuine
+rears that both modalities can agree on it without also rejecting real rears that don't happen to
+match. **Stretch is plausibly rearing-characteristic** (a rearing rat extends its body, so
+ear-to-hip distance should co-vary with height reasonably consistently) — which is likely why
+`dist_earmean_hipmean` survives much better than `dist_spineF_tb` (75.5% recall) despite similar
+raw RMSE (8.15 vs. 8.84mm). **Body turn direction is not rearing-characteristic at all** — a rat can
+rear facing any direction, so requiring the turn/torsion value to match a template built from a
+particular (arbitrary) set of anchor rears imposes a spurious extra constraint that rejects
+genuine rears whose incidental turn angle didn't match, hurting recall without buying real
+precision. A lower cross-modality RMSE doesn't fix this, because the problem isn't noise — it's that
+the corridor is being asked to also encode information about an axis the ground-truth behavior
+doesn't actually constrain.
+
+**This means §8u does *not* show that `angle_torsion_xy` or any other turn feature is unreliable for
+detecting turning behavior — it shows that testing a turn feature against a *rearing* ground truth
+is the wrong test.** The methodologically correct next step, not yet done, is to build an
+**independent ground-truth anchor set for turning (and separately for crouch/stretch) events** —
+mirroring exactly how rearing's own ground truth was built (§7's hysteresis detector on a
+height-like signal) but applied to the turn/stretch signal itself (e.g., hysteresis thresholds on
+`angle_torsion_xy` or `dist_earmean_hipmean` directly, rather than routing through the rearing
+template at all) — then measure SLEAP-vs-DANNCE precision/recall for *those* events. Only that test
+can actually answer "can this feature reliably detect turning/crouching as its own behavior."
+
+**Practical recommendation in the meantime:** if the goal is a single combined online-rule corridor
+covering rearing plus a secondary dimension, `ear_mean_z` + `dist_earmean_hipmean` is the better
+of the two additions tested (83.7% pooled recall, only R6 dips below 80% at 77.9%) — but recognize
+this is still fundamentally a *rearing* detector with a stretch constraint bolted on, not a
+general-purpose turn/crouch classifier. For genuinely detecting "is the animal turned left" or "is
+the animal crouched" as their own events, build dedicated ground truth for those behaviors first.
+
+Scripts: same as §8t (`stage22_feature_subset_matching.py`, now 129 combos including the 24
+targeted triples) → `stage22_combo_results.csv` (3,741 rows), `stage22_combo_summary.csv`; figures
+`make_figure_stage22.py` → F28 (updated, all 129 combos), F30 (per-rat breakdown of the
+height+turn+stretch additions).
+
+---
+
+## 8v. Redone with a feature-specific ground truth — §8u's explanation doesn't hold up
+
+§8u's account for why turn features failed was "wrong ground truth, not bad features": every combo
+was scored against a ground truth anchored in the real production PC0/PC1 (rearing) template,
+regardless of which feature was being tested — plausibly disadvantaging any feature not
+behaviorally coupled to rearing. Direct test, on request: **rebuild the ground truth separately
+for every feature set, in that feature set's own space**, rather than reusing one shared,
+rearing-anchored ground truth for all 129 combos.
+
+**Revised pipeline** (`stage23_feature_specific_ground_truth.py`) — steps 1 and 5+ unchanged from
+§8t/§8u, only the ground-truth construction (formerly steps 2-3) changes:
+
+1. *(unchanged)* Pass 1: SLEAP matches the real production template (PC0/PC1, bounds ×1.25) →
+   candidate windows `m1`. This is now the **only** place PC0/PC1 enters the pipeline — it just
+   seeds which times are candidates at all, same role as always.
+2. **(changed)** For feature set F: rebuild a DANNCE-only template **in F's own space**, from
+   DANNCE's F-values at the `m1` windows (bounds = std(SLEAP F-seg) + std(DANNCE F-seg),
+   accepted_errors scaled to F's dimensionality).
+3. **(changed)** Match DANNCE's own F-trajectory against that F-space template → `gt_F`, a
+   ground-truth anchor set **specific to F**, not shared across feature sets.
+4. *(unchanged in form, now uses `gt_F`)* Rebuild both a SLEAP and a DANNCE template in feature
+   space F from `gt_F`.
+5. *(unchanged)* Match each modality independently against its own F-space template, pair within
+   10 frames → TP/FP/FN.
+
+**A striking diagnostic fell out immediately: ground-truth size explodes for angle features, and
+barely moves for height features (F31).** Median `gt_F` events/session: `ear_mean_z` 37,
+`ear_snout_mean_z`/`snout_z` ~38 — essentially the same size as the original `m1` seed pool (~87 in
+a representative session), confirming height really is tightly, self-consistently coupled to the
+seed rearing behavior. Every angle feature, in contrast, balloons to **600–830 events/session** —
+7–20× the seed pool. This happens because a high-variance feature's own template ends up with wide
+bounds, so re-matching against that wide corridor picks up far more of the session than the
+original rearing candidates ever covered. Distance features land in between (120–173). **A feature
+whose own "ground truth" ends up covering most of the session isn't behaviorally selective enough
+to be a useful event-detector on its own — this is itself a mark against the angle features,
+independent of any precision/recall number.**
+
+**Despite the ground truth changing character completely for angle features (10-20× larger,
+no longer restricted to rearing-like windows at all), the precision/recall conclusions are
+essentially unchanged (F32):**
+
+| combo | stage22 (shared rearing GT) | stage23 (feature-specific GT) |
+|---|---|---|
+| `ear_mean_z` | 93.1% / 95.9% | 94.1% / 95.7% |
+| `ear_mean_z` + `dist_earmean_hipmean` | 93.6% / 83.7% | 93.2% / 81.1% |
+| `ear_mean_z` + `angle_skip_xy` | 90.6% / 84.4% | 90.9% / 82.1% |
+| `ear_mean_z` + `angle_torsion_xy` | 94.4% / 67.3% | 96.5% / 66.9% |
+| `ear_mean_z` + `angle_body_head_xy` | 92.1% / 66.5% | 93.9% / 68.3% |
+| `angle_torsion_xy` alone | 54.0% / 41.6% | 53.8% / 45.6% |
+| `angle_body_head_xy` alone | 44.7% / 44.2% | 46.2% / 44.7% |
+
+All of the qualitative conclusions survive: `ear_mean_z` and `ear_mean_z`+`dist_earmean_hipmean`
+still comfortably clear 80/80; `angle_skip_xy` still barely survives paired with height; and
+**`angle_torsion_xy`/`angle_body_head_xy` still fail, at essentially the same recall, even when
+matched against a ground truth built entirely from their own values.** Per-rat, the failure is
+consistent too (`angle_torsion_xy` alone: R4 52.1%/44.4%, R5 59.2%/49.2%, R6 50.2%/43.0% —
+precision/recall — bad in all three, not an average masking one rat).
+
+**This overturns §8u's specific explanation, though not its general caution.** Giving
+`angle_torsion_xy`/`angle_body_head_xy` a ground truth built entirely from their own signal —
+exactly the "correct next step" §8u called for — does **not** rescue them. Combined with the
+ground-truth-size finding above (their own self-consistent corridor is so wide it swallows most of
+the session), the more accurate conclusion is: **these two angle definitions have a genuine
+SLEAP-vs-DANNCE cross-modality reliability problem, not merely a ground-truth-mismatch artifact.**
+`angle_skip_xy` remains the one turn candidate that behaves reasonably under either methodology,
+and `dist_earmean_hipmean` remains the solid stretch candidate — both conclusions are now supported
+by two independent ground-truth constructions, which is stronger evidence than either alone.
+
+**Practical recommendation, updated:** `ear_mean_z` (+ `dist_earmean_hipmean` for a
+crouch/stretch-aware corridor) remains the safe, validated choice. Do not pursue
+`angle_torsion_xy` or `angle_body_head_xy` as-defined for online matching — the failure mode looks
+intrinsic to those specific geometric definitions (both fail badly under two independent
+ground-truth constructions and both have anomalously large self-consistent corridors), not an
+artifact of testing methodology. `angle_skip_xy` is marginal (clears pooled 80/80 both times, but
+individual-rat recall dips into the mid-70s for R6 in the harder test) — usable if some turn signal
+is needed, but budget for R6-level degradation.
+
+Scripts: `scripts/stage23_feature_specific_ground_truth.py` → `stage23_combo_results.csv` (3,836
+rows), `stage23_gt_sizes.csv` (ground-truth event counts per combo × session — the key diagnostic),
+`stage23_combo_summary.csv`; figures `make_figure_stage23.py` → F31 (ground-truth size by feature),
+F32 (stage22-vs-stage23 side-by-side for the key combos).
+
+---
+
+## 8w. Two more angle variants, and a direct test of `ear_mean_z + angle_skip_xy + dist_ears_tb`
+
+Two more angle features, on request, both testing whether swapping in a different second axis
+changes the picture:
+
+| feature | definition |
+|---|---|
+| `angle_mid_head_xy` | signed XY angle, (SpineM−SpineL)→(EarMean−SpineM) — a "mid" variant that skips SpineF and goes straight to the ears |
+| `angle_torsion_ear_xy` | signed XY angle, (HipR−HipL)→(EarR−EarL) — torsion using the ear axis instead of the shoulder axis |
+
+**Reliability (§8s-style, world space, 6.45M frames):** `angle_mid_head_xy` is unremarkable —
+16.97° RMSE / 77.8% sign agreement, mid-of-the-pack among all 8 angles now tested (F27).
+`angle_torsion_ear_xy` is the **worst angle by RMSE of all 8** (23.96°, edging out even
+`angle_body_head_xy`'s 23.03°), with middling sign agreement (79.8%). Swapping the shoulder axis
+for the ear axis in torsion made things *worse*, not better: the ears sit close together relative
+to the hips (a much shorter lever arm than shoulder-to-shoulder) and the head can rotate somewhat
+independently of the trunk, so the ear axis is both structurally noisier to measure precisely and a
+less faithful proxy for whole-body torsion than the shoulder axis is.
+
+**Direct test of the specific combo `ear_mean_z + angle_skip_xy + dist_ears_tb`** (height +
+turn + stretch, all three already-established candidates), using the exact §8v feature-specific
+ground-truth pipeline. This combination was already among the 24 originally-targeted triples in
+§8u/§8v; recomputed here independently as a direct check and it reproduces **exactly**:
+
+| | precision | recall |
+|---|---|---|
+| pooled | 91.8% | **75.6%** |
+| R4 | 89.8% | 80.9% |
+| R5 | 94.4% | 73.0% |
+| R6 | 84.3% | 77.6% |
+
+**Does not clear 80/80 pooled** — recall falls short at 75.6%, and only R4 individually clears
+both thresholds (R5 and R6 both land in the mid-to-high 70s for recall). This is consistent with
+the broader §8u/§8v pattern: `angle_skip_xy` is the one turn feature that survives reasonably well
+paired with height, but adding *any* second feature to `ear_mean_z` costs some recall relative to
+`ear_mean_z` alone (94.1%/95.7% pooled, §8v). `ear_mean_z + dist_ears_tb` alone (no turn term) scores
+94.1%/81.5% pooled — already better recall than the full 3-feature combo above, so folding in
+`angle_skip_xy` on top of the height+stretch pair costs recall rather than adding useful signal for
+*this* (rearing) ground truth. This underscores §8t's original finding: `ear_mean_z` by itself
+remains the strongest single choice, and additional dimensions should be added only when the
+specific behavior being targeted (not just rearing) actually requires them.
+
+Scripts: same `compute_all_features`/`TURN_FEATURES` additions applied to
+`stage21_feature_reliability.py` and `stage23_feature_specific_ground_truth.py`; figure
+`make_figure_stage21.py` → F27 (updated to 16 features).
+
+---
+
+## 8x. Four independent behavioral templates: rearing, turning, rear+turn, locomotion
+
+Everything through §8w tested features against ONE ground truth: rearing. The user's actual goal —
+reliably reward specific *oriented* rears (left/right) — needs the matching pipeline validated
+against a **turning**-relevant ground truth too, ideally one that is not itself bootstrapped through
+the rearing template (§8v's fix only made the *evaluation* feature-specific; the *seed* step was
+always rearing). This section builds four independent seed procedures, each derived from SLEAP's
+own signal with no DANNCE or rearing-template involvement, then runs the exact §8v feature-specific
+ground-truth-and-match pipeline for each:
+
+| template | seed definition (from SLEAP's own signal) |
+|---|---|
+| `rearing` | unchanged: SLEAP matches the real production template (PC0/PC1, bounds ×1.25) |
+| `turning` | hysteresis event detector on SLEAP's own \|`angle_torsion_xy`\| (rise=45°, reset=25°, min 10 frames — calibrated to give 72–118 events/session across all 3 rats, comparable in scale to the rearing seed pool) |
+| `rear_turn` | the *subset* of rearing-seed windows whose trailing 30 frames also cross the turning-seed rise threshold in \|`angle_torsion_xy`\| — i.e. rears where SLEAP's own signal says the body was also significantly turned |
+| `locomotion` | hysteresis on SLEAP's own `speed` (rise=150 mm/s, reset=60 mm/s, min 10 frames), excluding any bout overlapping a rearing-seed window |
+
+Tested 42 feature combinations (all 16 singles, all height×turn pairs [24], and 2
+height+turn+stretch triples) against all 4 templates = 168 combo-template evaluations, same
+corrector-OFF/new-model session set (33 sessions) as §8t–§8w.
+
+**Critical finding: the corridor-template-matching paradigm itself only works for behaviors with a
+consistent postural "shape" — pure turning and locomotion structurally break it, and this is not a
+threshold-tuning problem (F33).** Median ground-truth size after the rebuild-and-rematch step,
+across all 16 features: `rearing` 27→~276, `rear_turn` 22→~256 (both a few-fold expansion from the
+seed, in the range already seen for well-behaved features in §8v) — but `turning` explodes from a
+seed of 87 to **~1,178 events**, and `locomotion` from 94 to **~898** — both approaching **1,200,
+the theoretical maximum** given the session length and 30-frame refractory (36,000/30). This held
+even after tightening the turning threshold enough to shrink the seed pool to just 14 events —
+**every feature's rebuilt template still exploded to the ~1,200 ceiling.** The mechanism: rebuilding
+a template's mean+bounds from a small sample only produces a *tight, selective* corridor if the
+target behavior corresponds to a narrow, consistent value in that feature space. Rearing does (a
+specific height range, held for the duration); pure turning and locomotion do not — a rat can turn
+or move at essentially any height, distance configuration, or torsion magnitude, so *no* feature's
+seed-window sample is narrow enough to build a selective template. **This means the `turning` and
+`locomotion` precision/recall numbers below should not be trusted as measuring genuine behavior
+detection** — with a ~1,200-event "ground truth" on a 1,200-slot session, a feature that fires
+often anywhere is rewarded regardless of whether it means anything behaviorally.
+
+**`rearing` and `rear_turn`, by contrast, are trustworthy** — their ground truth stays in the same
+well-behaved range established throughout §8t–§8w, because both inherit rearing's tight postural
+signature (rear+turn is literally a subset of rears, by construction). Top results (F34):
+
+| combo | rearing | turning (untrustworthy) | rear+turn | locomotion (untrustworthy) |
+|---|---|---|---|---|
+| `ear_mean_z` | 94.0%/95.2% | 84.1%/84.3% | 94.1%/95.8% | 78.3%/80.3% |
+| `ear_mean_z`+`angle_skip_xy` | 90.9%/82.1% | 68.1%/69.8% | 89.8%/80.2% | — |
+
+`rear_turn` reproduces almost exactly the same numbers as plain `rearing` for both combos — sensible,
+since rear+turn events are a subset of rears and the height-dominated corridor construction doesn't
+change much when restricted to that subset. Per-rat, `ear_mean_z + angle_skip_xy` on `rear_turn`:
+R4 87.3%/81.4%, R5 93.9%/80.8%, R6 76.6%/74.8% (R6 misses 80/80 individually, consistent with R6
+being the weakest rat throughout this document).
+
+**Direct test of the actual goal — detecting LEFT- vs. RIGHT-turned rears separately (F35).** Split
+`rear_turn`'s seed pool by the sign of the peak `angle_torsion_xy` value within each rear window
+(median 26 left-turn events/session, 15 right-turn), then reran `ear_mean_z` and
+`ear_mean_z+angle_skip_xy` against each direction independently:
+
+| | precision | recall |
+|---|---|---|
+| left, `ear_mean_z` | 93.8% | 95.0% |
+| left, `ear_mean_z+angle_skip_xy` | 90.0% | 74.0% |
+| right, `ear_mean_z` | 93.9% | 96.2% |
+| right, `ear_mean_z+angle_skip_xy` | 82.6% | 76.9% |
+
+Both directions land close to, but just under, 80/80 (74–77% recall) — meaningfully above chance
+and not far off target, without any direction-specific tuning of bounds or `accepted_errors`.
+`ear_mean_z + angle_skip_xy` is therefore a *reasonable starting point* for rewarding
+direction-specific oriented rears, but not yet a validated final answer — the next tuning step
+(below) is a natural place to close the remaining gap.
+
+**Practical recommendations:**
+1. For the user's actual goal (reward oriented rears), use the **`rear_turn`** template
+   (rear-restricted, not pure turning) — pure turning/locomotion as free-floating, posture-independent
+   behaviors are not reliably matchable by this template-corridor paradigm at all, independent of
+   which feature is used.
+2. `ear_mean_z + angle_skip_xy` is the best-validated starting combo for rear+turn detection, and
+   comes reasonably close to 80/80 when split by direction (74–77% recall per side). Tightening
+   `accepted_errors` or bounds specifically for the direction-split task (currently reusing the
+   generic 2-feature settings from §8v) is a cheap, not-yet-tried next step.
+3. If a genuinely posture-independent turn or locomotion detector is needed later, it requires a
+   fundamentally different matching approach — not more threshold tuning within this corridor
+   paradigm — e.g. variable-length event matching or a peak-anchored single-frame classifier instead
+   of a fixed 30-frame corridor built from a rebuilt mean+bounds template.
+
+Scripts: `scripts/stage24_multi_template_features.py` → `stage24_seed_counts.csv`,
+`stage24_results.csv` (5,029 rows), `stage24_summary.csv`; figures `make_figure_stage24.py` → F33
+(ground-truth-size diagnostic), F34 (precision/recall across all 4 templates), F35
+(direction-specific rear+turn).
+
+---
+
+## 8y. Does PC2/PC3 actually measure "turnedness"? Correlation and loading analysis
+
+Direct test of a specific hypothesis: does the real production template's PC2/PC3 (the components
+immediately after the PC0/PC1 the online rule actually uses) correspond to how turned the animal's
+body is — and by extension, how well do the hand-designed turn angles (§8s–§8x) capture the same
+thing? Computed from the exact representation PC2/PC3 themselves come from
+(`ev.project_session_to_pcs`'s egocentric, z-flipped-for-SLEAP, causal-median-filtered
+"rotated_med" output — the online rule's own pipeline), so angle and PC values are frame-matched,
+computed independently for SLEAP and for DANNCE (within-modality, not a SLEAP-vs-DANNCE reliability
+check), pooled over all 172 dual-modality sessions (not just the 33-session corrector-OFF subset —
+this is a construct-validity question, not a tracking-reliability one, so the full cohort gives more
+power and more generality).
+
+**First finding: the PCA basis is fixed per rat, not per template.** `pc_weights` (and
+`feature_means`) are byte-identical across every template version used within a rat (4 versions for
+R4, 7 for R5, 8 for R6, all exactly 0.000000 max difference) — the PCA is fit once, early on, and
+every subsequent template refinement only updates the 30-frame target mean/bounds, never the
+underlying basis. So there are really only **3 distinct PC2/PC3 definitions in this whole
+investigation** — one per rat — not one per template file.
+
+**Correlation result: real, but partial — no angle feature is a clean proxy for PC2/PC3 (F36).**
+
+| feature | median \|r\| PC2 | median \|r\| PC3 | joint R² (PC2+PC3) |
+|---|---|---|---|
+| `angle_mid_xy` | 0.467 | 0.126 | **0.252** |
+| `angle_torsion_ear_xy` | 0.457 | 0.120 | 0.244 |
+| `angle_torsion_xy` | 0.451 | 0.146 | 0.235 |
+| `angle_lower_xy` | 0.450 | 0.125 | 0.233 |
+| `angle_mid_head_xy` | 0.437 | 0.118 | 0.231 |
+| `angle_skip_xy` | 0.402 | 0.145 | 0.206 |
+| `angle_body_head_xy` | 0.325 | 0.103 | 0.130 |
+| `angle_upper_xy` | 0.295 | 0.118 | 0.105 |
+
+Every angle correlates moderately with PC2 alone (\|r\|≈0.3–0.47) and weakly with PC3 (\|r\|≈0.10–0.15);
+jointly, PC2+PC3 explain at most **~25% of the variance** in any hand-designed angle (`angle_mid_xy`,
+not `angle_skip_xy`, is the best match). PC3 adds almost nothing beyond PC2 for most angles — e.g.
+`angle_mid_xy`'s joint R² (0.252) is barely above what PC2 alone would give (0.467² ≈ 0.218).
+**`angle_skip_xy` specifically (the recommended §8x turn feature) sits mid-pack, not top: 0.206 joint
+R².** This is a real, meaningful overlap — these are not unrelated quantities — but it is far from
+an equivalence; treating PC2/PC3 as a drop-in replacement for (or validation of) any of these
+angle features, or vice versa, would overstate the relationship by a wide margin.
+
+**Loadings analysis explains why (F37): PC2 and PC3 are not a clean "torso-turned" axis at all —
+they reflect the dominant modes of postural variation *within rearing specifically* (the behavior
+the production template was trained on), not a general body-orientation construct.**
+
+- **PC2 ≈ one-sided limb chain + TailBase** (+ a smaller Snout/Spine component). Top loadings are
+  consistently *TailBase plus one leg's Foot/Ankle/Knee/Hip* in every rat — R4: FootL/AnkleL/
+  TailBase/KneeL/Snout/HipL; R5: TailBase/Snout/AnkleR/FootR/KneeR/HipR; R6: FootR/AnkleR/TailBase/
+  KneeR/AnkleL/HipR. The *structure* (tail + one hind leg) is consistent across all 3 rats; *which*
+  side dominates is rat-specific (idiosyncratic to whatever varied most in that rat's training
+  data) — not the bilateral hip-vs-shoulder comparison `angle_torsion_xy` was designed to measure.
+- **PC3 ≈ snout pitch + both forelimbs**, remarkably consistent across all 3 rats: Snout is the
+  single largest loading in every rat by a wide margin (0.53, 0.52, 0.61 magnitude — versus the next
+  keypoint at roughly half that), overwhelmingly on the **Z axis** (nose pointed up/down, not
+  left/right), plus Hand/Wrist/Elbow on both sides. This reads as a "how far is the snout
+  pitched, and where are the forepaws" axis — plausibly a reach/sniff/forepaw-placement mode of
+  variation during a rear — not turning in any sense.
+
+**Bottom line for the user's hypothesis:** PC2/PC3 are *not* primarily a "turnedness" signal. They
+are data-driven components reflecting whatever postural variation was most prominent within the
+rearing examples used to fit each rat's template — one-sided limb/tail placement (PC2) and snout
+pitch/forelimb position (PC3). Both plausibly correlate *partially* with body turning (a rat leaning
+into a turn probably also shifts limb weight and forelimb position somewhat), which is exactly the
+~20–25% R² observed, but the hand-designed angle features (particularly `angle_mid_xy`,
+`angle_torsion_xy`, and `angle_lower_xy`, all ≥0.23 joint R²) remain the more direct, more
+interpretable way to measure "how turned" the animal is — precisely because they were built to
+measure that one thing, rather than inheriting whatever else happened to vary in the rearing
+training set.
+
+Scripts: `scripts/stage25_pc23_correlation.py` → `stage25_pc_correlations.csv` (3,008 rows),
+`stage25_pc_loadings.csv` (19 templates × 2 PCs × 23 keypoints); figures `make_figure_stage25.py`
+→ F36 (correlation summary), F37 (per-keypoint loadings by rat).
+
+---
+
+## 8z. Do the direction-split detectors actually separate left from right? Partly — and §8x's own numbers never tested it
+
+§8x reported per-direction precision/recall for the `rear_turn` split (F35) and concluded
+`ear_mean_z + angle_skip_xy` was "a reasonable starting point for rewarding direction-specific
+oriented rears," with bounds tuning as the next step. **That conclusion rested on an untested
+premise.** Those precision/recall numbers are SLEAP-vs-DANNCE *agreement*
+(`tp=|both|`, `fp=|sleap_only|`, `fn=|dannce_only|` — `stage24:353`), not behavioral correctness:
+they say the two modalities fire on the same frames, not that those frames are genuinely
+left-turned rears. A height-only corridor carries no directional information whatsoever, so
+`ear_mean_z`'s ~94%/95% on *both* directions in F35 is equally consistent with "both modalities
+match every rear and agree while doing so." Tested directly here.
+
+**Design.** For each direction D, build the direction-specific SLEAP detector exactly as §8x does,
+then score it against *both* pools of seed events: `hit(D,P)` = fraction of pool P's rear+turn
+events the detector fires on (within 10 frames). Directional selectivity means
+`hit(L,L) >> hit(L,R)`. Two supporting diagnostics, since a high hit rate is trivial for a detector
+that fires everywhere: the match count per session, and the overlap between the two
+"direction-specific" detectors' match sets.
+
+**Result 1 — the premise was right about height alone: it does not separate directions.**
+
+| combo | L det. on L | L det. on R | R det. on R | R det. on L | detector overlap L↔R |
+|---|---|---|---|---|---|
+| `ear_mean_z` | 0.734 | 0.638 | 0.726 | 0.506 | **0.81 / 0.83** |
+| `ear_mean_z + angle_skip_xy` | 0.548 | 0.234 | 0.561 | 0.283 | 0.57 / 0.46 |
+| `ear_mean_z + angle_torsion_xy` | 0.458 | 0.280 | 0.502 | 0.233 | 0.54 / 0.49 |
+
+The two height-only "direction-specific" detectors fire on **81–83% of the same events** — they are
+substantially the same detector wearing two labels. The residual gap (+0.10/+0.22) is not
+directional discrimination; it is own-pool circularity (each detector's template is built from the
+pool it is then scored on) plus the left/right pools differing in size and therefore in corridor
+width. **F35's height-only rows should not be read as a direction-split result.**
+
+**Result 2 — but `ear_mean_z + angle_skip_xy` does carry genuine directional information.**
+Own-pool hit rate ≈2× other-pool (0.548 vs 0.234; 0.561 vs 0.283), and detector overlap drops from
+0.81/0.83 to 0.57/0.46. Positive separation in all three rats individually (R4 +0.32/+0.09,
+R5 +0.28/+0.45, R6 +0.25/+0.20) — R4's right-detector separation is weak, the rest are real. So
+the direction split is **not vacuous for the 2-feature combo**; §8x's premise survives, weakly.
+
+**Result 3 — the real problem is that the direction detector only recovers ~55% of its own pool.**
+`hit(L,L)=0.548`, `hit(R,R)=0.561`: the detector misses nearly half the events it was built from.
+This is a harsher and more honest reading than F35's 74–77% recall, which measured cross-modality
+agreement rather than pool recovery. Tightening bounds (§8x recommendation 2) trades against
+exactly this number — it is not a 3-6 point gap to close but closer to a 45-point one.
+
+**Result 4 — a hard ceiling nobody had measured: SLEAP and DANNCE agree on the turn *sign* only
+84.7% of the time.** On ~15% of rear+turn events the two modalities disagree about which way the rat
+was turned (R4 0.82, R5 0.85, R6 0.86 — consistent, not one bad rat). Every direction-split
+validation in this document is capped by this, because the ground truth is built from one modality
+and scored against the other. Any target above ~85% per-direction agreement is unreachable by
+construction, independent of features or tuning.
+
+**Result 5 — `angle_torsion_xy` does not separate better than `angle_skip_xy`**, despite being the
+purpose-designed torsion measure (sep +0.18/+0.27 vs +0.31/+0.28, and lower own-pool hit at
+0.46/0.50). Independent confirmation of §8v's ruling, now on a turn-specific test rather than a
+rearing-anchored one.
+
+**Two provenance discrepancies with §8x, which cannot be resolved because F35's generating code is
+lost** (`make_figure_stage24.py:84` reads `directional_rear_turn.csv` from a deleted `/tmp`
+scratchpad; the PNG survives, the CSV and script do not):
+- **Pool sizes don't reconcile.** §8x reports "median 26 left-turn events/session, 15 right-turn"
+  — a total of 41, against `stage24_seed_counts.csv`'s own `n_seed_rear_turn` median of **22.5**.
+  This reconstruction gives medians 9 left / 11 right (total 25), consistent with the surviving seed
+  counts. Whatever produced F35 used a different pool than stage24 wrote.
+- **Direction balance is strongly rat-specific and mostly right-dominant** (R4 8 vs 26, R5 10 vs 29,
+  R6 11 vs 3 per session) — the opposite of §8x's left-dominant report. The sign convention here
+  may be flipped relative to F35's and there is no surviving code to check against.
+
+**Note on scope: the session set has grown since September.** 56 sessions now qualify as
+corrector-OFF/new-model (47 usable after the world-space fit guard), versus 32 when §8t–§8y were
+computed. These numbers are on the larger set; the §8t–§8y numbers have not been recomputed on it.
+
+**Practical conclusion.** `ear_mean_z + angle_skip_xy` is a real but weak direction discriminator,
+not the near-validated detector F35 implied. Before any bounds tuning, the question to settle is
+whether ~55% own-pool recovery against an 84.7% cross-modality sign ceiling is good enough for a
+reward rule at all — if the goal is reliably rewarding left-vs-right oriented rears, this says the
+current feature set is not there, and that the limiting factor may be turn-sign measurement itself
+rather than the matching corridor.
+
+Scripts: `scripts/stage26_direction_separation.py` → `stage26_separation_per_session.csv`
+(139 rows), `stage26_separation_summary.csv`. Also regenerates the direction-split logic lost with
+F35's scratchpad script.
+
+---
+
 ## 9. Caveats
 
 - **n = 3 rats.** Every cross-rat pattern is descriptive. The within-rat, within-behaviour designs in
@@ -1361,8 +2213,45 @@ Scripts: `scripts/stage18_dannce_ground_truth_overlap.py` (now `FEATURES = ['ful
 ## 10. Recommendations
 
 *(Revised 2026-09-02, after §8l. Former items are done — see §8k/§8l — and are kept below,
-struck through, for the record; everything else is reordered by priority given what §8l found.)*
+struck through, for the record; everything else is reordered by priority given what §8l found.
+Updated 2026-09-09: §8t supersedes item 4 below as the top actionable recommendation, at least for
+the corrector-OFF/new-model tracking era — see item 0.)*
 
+0. **Prototype `ear_mean_z` (mean Z-height of EarL/EarR, no snout) as the online-rule feature —
+   §8t.** The single most concrete, deployable result in this document: this one interpretable
+   feature alone gets 93%/96% precision/recall (pooled), clears 80%/80% in every rat individually,
+   and beats every 1- or 2-feature combination tested (19/55 combos cleared the bar; adding a
+   second feature to `ear_mean_z` never improved on it). Cheaper and simpler than the axial-9kp/PCA
+   candidate in item 4 below, with a directly interpretable physical meaning (how high the ears
+   are held). **Scope caveat:** tested only on the corrector-OFF/new-SLEAP-model era (§8r's most-
+   accurate stratum, 33 sessions) by explicit request — not yet validated against the corrector-ON
+   majority of the historical cohort, where §8s's RMSEs roughly double and precision/recall would
+   be expected to land closer to stage18's full23 baseline (0.79–0.87). Rerunning §8t's exact
+   pipeline on the corrector-ON sessions (or the full cohort) is the natural next step before
+   treating this as a universal recommendation rather than an era-specific one.
+0b. **Turn features `angle_torsion_xy`/`angle_body_head_xy`: tested and dropped, not just deferred
+   — see §8u→§8v.** §8u initially hypothesized their failure (66-68% recall paired with
+   `ear_mean_z`) was a ground-truth-anchoring artifact (rearing-anchored ground truth
+   disadvantages a feature not characteristic of rearing). §8v tested that directly — rebuilding
+   the ground truth entirely from each feature's own values — and the failure **persists at
+   essentially the same recall** (~67-68%), with a compounding red flag: these two angles' own
+   "self-consistent" corridor is so wide it matches 600-830 events/session (vs. ~37-90 for height
+   features), meaning they aren't behaviorally selective in the first place. Treat these two
+   specific angle definitions as ruled out for online matching, not merely under-tested.
+   `dist_earmean_hipmean` (crouch/stretch, 81-84% recall paired with height) and `angle_skip_xy`
+   (turn, 82-84% pooled but R6 dips to mid-70s) both replicate under both ground-truth
+   constructions and remain the validated candidates for their respective category.
+0c. **For rewarding oriented (left/right-turned) rears specifically, use `rear_turn` as the
+   template, not free-floating "turning" — see §8x.** Built and tested 4 independent
+   behavior-specific ground truths (rearing, turning, rear+turn, locomotion). **Pure turning and
+   locomotion structurally break the corridor-template-matching paradigm** — the ground truth
+   explodes to ~1,200 events/session (the theoretical maximum) for *every* feature tested, because
+   neither behavior corresponds to a consistent value in any feature space the way rearing's height
+   signature does. This is not fixable by threshold tuning (confirmed by testing far stricter
+   turning thresholds). `rear_turn` (rears that are *also* turned), by contrast, inherits rearing's
+   tight signature and gives trustworthy numbers: `ear_mean_z + angle_skip_xy` reaches 89.8%/80.2%
+   pooled, and split by turn direction reaches 90.0%/74.0% (left) and 82.6%/76.9% (right) — close
+   to but not quite 80/80 per direction, without any direction-specific tuning yet.
 1. ~~Retest posture and limb configuration on the real production SLEAP 2D.~~ **Done, §8k.** Split
    verdict: scalar posture gives a real, rat-dependent improvement (pooled ρ +0.46→+0.50, R4 becomes
    significant); limb-configuration clustering is actively harmful (pooled ρ collapses to +0.07,

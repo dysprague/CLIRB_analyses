@@ -103,23 +103,32 @@ ax1.legend(fontsize=8, ncol=3, loc='lower center')
 ax2.set_yticks([])
 tidy(ax1)
 
-# new row: per-session sample size behind each precision/recall point --
-# total ground-truth DANNCE events ("rears") and total SLEAP matches
-base_s['n_rears'] = base_s['both'] + base_s['dannce_only']       # total DANNCE ground-truth events
-base_s['n_matches'] = base_s['both'] + base_s['sleap_only']      # total SLEAP matches fired
-ax3 = fig.add_subplot(gs[2, :], sharex=ax1)
-for rat in RATS:
-    g = base_s[base_s.rat == rat].sort_values('session_idx')
-    ax3.plot(g.session_idx, g.n_rears, '-', color=SERIES[rat], lw=1.6, marker='o', ms=3,
-             label=f'{rat} rears (DANNCE ground truth)')
-    ax3.plot(g.session_idx, g.n_matches, '--', color=SERIES[rat], lw=1.3, marker='s', ms=3,
-             alpha=0.75, label=f'{rat} SLEAP matches')
-ax3.set_xlabel('session index (chronological, within rat)')
-ax3.set_ylabel('count per session')
-ax3.set_title('Sample size behind each point above: total rears (solid) vs. total SLEAP matches (dashed)',
-              fontsize=10, color=INK)
-ax3.legend(fontsize=6.8, ncol=3, loc='upper right')
-tidy(ax3)
+# new row: per-session sample size behind each precision/recall point -- total
+# REAL rears (hysteresis-detected directly on the DANNCE PC0 trajectory, never
+# touching any template match) broken into exclusive categories: did that rear
+# get a DANNCE-side match, a SLEAP-side match, both, or neither (full23 only).
+rear_summ = pd.read_csv(f'{RES}/stage18_rear_session_summary.csv')
+REAR_CATS = ['both', 'dannce_only', 'sleap_only', 'neither']
+REAR_CAT_COL = {'both': CAT_COL['both'], 'dannce_only': CAT_COL['dannce_only'],
+                'sleap_only': CAT_COL['sleap_only'], 'neither': '#c7c4bc'}
+REAR_CAT_LABEL = {'both': 'both', 'dannce_only': 'DANNCE only', 'sleap_only': 'SLEAP only',
+                  'neither': 'neither (matched by neither)'}
+rear_axes = []
+for col, rat in enumerate(RATS):
+    ax3 = fig.add_subplot(gs[2, col])
+    g = rear_summ[rear_summ.rat == rat].sort_values('session_idx')
+    bottom = np.zeros(len(g))
+    for cat in REAR_CATS:
+        ax3.bar(g.session_idx, g[cat], bottom=bottom, color=REAR_CAT_COL[cat],
+                label=REAR_CAT_LABEL[cat], width=0.9, linewidth=0)
+        bottom += g[cat].to_numpy()
+    ax3.set_xlabel('session index')
+    ax3.set_title(f'{rat} — sample size behind each point above (n={int(g[REAR_CATS].to_numpy().sum())} real rears)',
+                 fontsize=9, color=INK)
+    tidy(ax3)
+    rear_axes.append(ax3)
+rear_axes[0].set_ylabel('# real (hysteresis-detected) rears,\nby exclusive match outcome')
+rear_axes[0].legend(fontsize=7, loc='upper right')
 
 fig.suptitle('Plot 1 — SLEAP vs. DANNCE accuracy, baseline (full 23kp) feature space',
             fontsize=12.5, color=INK)

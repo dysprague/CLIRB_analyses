@@ -151,6 +151,18 @@ def windows_at(traj, ends, w=W):
     return traj[idx], e
 
 
+def sector_balanced_offset(s0, d0, sec, nsec=12, min_n=200):
+    """Session-level constant offset between SLEAP and DANNCE PC0, averaged
+    sector-by-sector so it carries no spatial bias -- same convention as
+    stage7_dannce_rears.py's balanced_offset."""
+    offs = []
+    for k in range(nsec):
+        m = sec == k
+        if m.sum() >= min_n:
+            offs.append(s0[m].mean() - d0[m].mean())
+    return float(np.mean(offs)) if offs else float(s0.mean() - d0.mean())
+
+
 def get_match_overlap(dannce_matches, sleap_matches, thresh=PAIR_THRESH):
     sleap_only = np.array([], dtype=int); dannce_only = np.array([], dtype=int)
     both = np.array([], dtype=int)
@@ -173,10 +185,10 @@ def process_session(rat, session, axial_bases, session_idx):
     raw = sc.get_raw_session(rat, session, want_dual=True)
     tm = tp.load_template(rat, session)
     if tm is None:
-        return []
+        return [], []
     d3 = du.dannce_aligned(raw)
     if d3 is None:
-        return []
+        return [], []
     n = min(len(raw['triang_3d']), len(d3))
     s_pcs, s_rot = ev.project_session_to_pcs(raw['triang_3d'][:n], tm, flip_z=True)
     d_pcs, d_rot = ev.project_session_to_pcs(d3[:n], tm, flip_z=False)
@@ -184,30 +196,41 @@ def process_session(rat, session, axial_bases, session_idx):
     com = raw['triang_3d'][:n].mean(axis=1)
     theta_all = ARENA.theta(com[:, :2]); sec_all = sector_index(theta_all, SECTOR_W)
 
+    # ---- independent, physically-grounded rear ground truth: hysteresis-detect
+    # rears directly on the DANNCE PC0 trajectory (never touching any template
+    # match), after a session-level sector-balanced SLEAP-DANNCE PC0 offset --
+    # same convention as stage7_dannce_rears.py. This is the "total rears"
+    # denominator for the sample-size panel, independent of matching outcome.
+    off0 = sector_balanced_offset(s_pcs[:, pcu[0]], d_pcs[:, pcu[0]], sec_all)
+    real_rears = [r for r in ev.detect_rears(d_pcs[:, pcu[0]] + off0) if r[1] < n]
+    rear_rs = np.array([r[0] for r in real_rears], dtype=np.int64)
+    rear_re = np.array([r[1] for r in real_rears], dtype=np.int64)
+
     # ---- Pass 1: SLEAP matches, bounds x1.25
     tmpl0 = tm['template'][:, :2]
     bounds0 = ev.template_bounds(tm) * 1.25
     m1, _ = ev.get_template_match_indices(s_pcs[:, pcu], tmpl0, bounds0,
                                           refractory_frames=REFRACTORY)
     if len(m1) == 0:
-        return []
+        return [], []
     m1 = ev.correct_matches(s_pcs, tmpl0, m1)
 
     # ---- rebuild DANNCE template from Pass-1 SLEAP matches (shared bounds)
     s_seg1, e1 = windows_at(s_pcs[:, pcu], m1)
     d_seg1, _ = windows_at(d_pcs[:, pcu], m1)
     if len(s_seg1) == 0:
-        return []
+        return [], []
     dannce_tmpl0, _, bounds1 = rebuild_and_bounds(d_seg1, s_seg1)
 
     # ---- ground-truth DANNCE matches
     gt, _ = ev.get_template_match_indices(d_pcs[:, pcu], dannce_tmpl0, bounds1,
                                           refractory_frames=REFRACTORY)
     if len(gt) == 0:
-        return []
+        return [], []
     gt = ev.correct_matches(d_pcs, dannce_tmpl0, gt)
 
     rows = []
+    rear_rows = []
     for feat in FEATURES:
         if feat == 'full23':
             s_traj, d_traj = s_pcs[:, pcu], d_pcs[:, pcu]
@@ -229,6 +252,23 @@ def process_session(rat, session, axial_bases, session_idx):
         sm = ev.correct_matches(s_traj, sleap_tmpl, sm) if len(sm) else np.array([], dtype=int)
         dm = ev.correct_matches(d_traj, dannce_tmpl, dm) if len(dm) else np.array([], dtype=int)
 
+        if feat == 'full23' and len(rear_rs):
+            hit_d, _ = ev.rear_matched(rear_rs, rear_re, dm)
+            hit_s, _ = ev.rear_matched(rear_rs, rear_re, sm)
+            for k in range(len(rear_rs)):
+                if hit_d[k] and hit_s[k]:
+                    rcat = 'both'
+                elif hit_d[k]:
+                    rcat = 'dannce_only'
+                elif hit_s[k]:
+                    rcat = 'sleap_only'
+                else:
+                    rcat = 'neither'
+                rear_rows.append(dict(rat=rat, session=session, session_idx=session_idx,
+                                      rear_start=int(rear_rs[k]), rear_end=int(rear_re[k]),
+                                      category=rcat,
+                                      sector=int(sec_all[min(int(rear_re[k]), n - 1)])))
+
         sleap_only, dannce_only, both = get_match_overlap(dm, sm)
         for frame in sleap_only:
             rows.append(dict(rat=rat, session=session, session_idx=session_idx, feature=feat,
@@ -245,11 +285,12 @@ def process_session(rat, session, axial_bases, session_idx):
                              category='both', frame=int(frame),
                              sector=int(sec_all[min(frame, n - 1)]),
                              theta=float(theta_all[min(frame, n - 1)])))
-    return rows
+    return rows, rear_rows
 
 
 def main():
     all_rows = []
+    all_rear_rows = []
     for rat in ['R4', 'R5', 'R6']:
         sessions = dual_sessions(rat)
         print(f'{rat}: {len(sessions)} dual-modality sessions', flush=True)
@@ -259,11 +300,12 @@ def main():
                 mu1=axial_bases['axial'][0], comps1=axial_bases['axial'][1],
                 mu2=axial_bases['axial2'][0], comps2=axial_bases['axial2'][1])
         for i, session in enumerate(sessions):
-            rows = process_session(rat, session, axial_bases, i)
+            rows, rear_rows = process_session(rat, session, axial_bases, i)
             all_rows.extend(rows)
+            all_rear_rows.extend(rear_rows)
             if i % 20 == 0:
-                print(f'  [{i+1}/{len(sessions)}] {session}: {len(rows)} events so far this session',
-                      flush=True)
+                print(f'  [{i+1}/{len(sessions)}] {session}: {len(rows)} events, '
+                      f'{len(rear_rows)} real rears so far this session', flush=True)
         print(f'{rat}: done, {sum(1 for r in all_rows if r["rat"]==rat)} total events', flush=True)
 
     d = pd.DataFrame(all_rows)
@@ -279,6 +321,30 @@ def main():
     summ['recall'] = summ['both'] / (summ['both'] + summ['dannce_only']).replace(0, np.nan)
     summ.to_csv(f'{OUT}/stage18_session_summary.csv', index=False)
     print(f'wrote {OUT}/stage18_session_summary.csv')
+
+    # ---- real, hysteresis-detected rears (full23 only): the honest denominator
+    # for the sample-size panel, with exclusive both/dannce_only/sleap_only/neither
+    # categories per physical rear (not per match event).
+    rr = pd.DataFrame(all_rear_rows)
+    rr.to_csv(f'{OUT}/stage18_rear_overlap.csv', index=False)
+    print(f'wrote {OUT}/stage18_rear_overlap.csv: {len(rr)} real rears')
+
+    rear_summ = rr.groupby(['rat', 'session', 'session_idx', 'category']).size().unstack(fill_value=0)
+    for c in ['both', 'dannce_only', 'sleap_only', 'neither']:
+        if c not in rear_summ.columns:
+            rear_summ[c] = 0
+    rear_summ = rear_summ.reset_index()
+    rear_summ['n_rears'] = rear_summ[['both', 'dannce_only', 'sleap_only', 'neither']].sum(axis=1)
+    rear_summ.to_csv(f'{OUT}/stage18_rear_session_summary.csv', index=False)
+    print(f'wrote {OUT}/stage18_rear_session_summary.csv')
+
+    print('\nPooled (all sessions), real hysteresis-detected rears, by category:')
+    for rat, g in rr.groupby('rat'):
+        c = g.category.value_counts()
+        b, do, so, ne = c.get('both', 0), c.get('dannce_only', 0), c.get('sleap_only', 0), c.get('neither', 0)
+        tot = b + do + so + ne
+        print(f'  {rat}: n_rears={tot}  both={b} ({b/max(tot,1):.1%})  dannce_only={do} ({do/max(tot,1):.1%})  '
+              f'sleap_only={so} ({so/max(tot,1):.1%})  neither={ne} ({ne/max(tot,1):.1%})')
 
     print('\nPooled (all sessions), baseline feature (full23):')
     for rat, g in d[d.feature == 'full23'].groupby('rat'):
