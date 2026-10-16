@@ -2302,6 +2302,112 @@ category: unwrapped RMSE plus sign agreement) → `stage21_feature_reliability.c
 
 ---
 
+## 8ab. The ~85% turn-sign "ceiling" is an artifact of near-zero frames — and `cum_heading_change` is the first turn feature that costs nothing
+
+Two passes, answering the question §8aa left open.
+
+### Pass 1 (stage27): sign agreement conditioned on an actual turn
+
+§8z measured 84.7% turn-sign agreement and called it a ceiling; §8aa found ~85% across 14
+direction-bearing features and concluded the ceiling was intrinsic to SLEAP-vs-DANNCE turn
+measurement. Both figures pool over ALL frames — including the majority where the rat is barely
+turning, the signed quantity sits near zero, and the two modalities are coin-flipping on noise.
+Recomputing sign agreement on frames where |SLEAP value| exceeds a threshold:
+
+| feature | all frames | q50 | q75 | q90 | q95 | q99 |
+|---|---|---|---|---|---|---|
+| **`cum_heading_change`** | 85.0 | **98.1** | **99.5** | **99.5** | 99.4 | 97.8 |
+| `hip_asym` | 81.8 | 92.8 | 94.8 | 95.1 | 94.5 | 90.5 |
+| `sagitta_spine` | 75.1 | 89.3 | 94.6 | 95.9 | 95.9 | 94.5 |
+| `angle_skip_xy` | 81.6 | 92.7 | 93.2 | 90.4 | 87.0 | **69.9** |
+| `angle_torsion_xy` | 81.2 | 91.7 | 92.7 | 90.3 | 87.1 | **70.5** |
+| `angle_body_head_xy` | 84.8 | 93.1 | 92.7 | 88.6 | 82.5 | **62.9** |
+
+**The ceiling was an artifact. `cum_heading_change` reaches 99.5% turn-sign agreement on the
+frames where the animal is actually turning**, consistent across rats (R4 99.2, R5 99.6, R6 99.7 at
+q90). In interpretable units:
+
+| \|`cum_heading_change`\| ≥ | 15° | 30° | 45° | 60° | 90° |
+|---|---|---|---|---|---|
+| sign agreement | 98.8% | 99.4% | **99.5%** | 99.5% | 99.6% |
+| share of frames | 41.7% | 29.2% | 22.2% | 17.5% | 11.7% |
+
+Compare `angle_torsion_xy` at the same absolute thresholds: 91.0 / 92.5 / 89.0 / 82.0 / **69.2%**,
+on only 7.2% of frames at ≥45°.
+
+**The angles get WORSE exactly where it matters, and that is diagnostic.** Every spine-chain angle
+peaks around q50–q75 and then degrades sharply — `angle_body_head_xy` falls to 62.9% at q99, worse
+than chance-adjacent. Large |angle| values are disproportionately *tracking artifacts* (a mis-placed
+keypoint swinging a short segment through a wide arc), not real extreme postures. The integrated
+heading signal shows the opposite profile — monotone improvement, then a plateau — which is the
+signature of a quantity whose large values are real. **This, not the unconditional RMSE ranking, is
+the clearest evidence yet that the angle family is the wrong parameterisation for turn direction.**
+
+This retracts §8aa's retraction: the caveat §8z originally carried was correct, and §8aa's
+"intrinsic ceiling" reading was wrong because it never conditioned on the behaviour.
+
+### Pass 2 (stage28): does it survive the matching pipeline?
+
+`ear_mean_z` + each candidate, through the exact §8v feature-specific ground-truth procedure on the
+`rear_turn` template, reporting three things §8x conflated: **ground-truth size** (corridor
+selectivity), **precision/recall** (SLEAP-vs-DANNCE *alignment*), and **seed recovery** (fraction of
+actual rear+turn seed events the SLEAP detector fires on — *detection*, which precision/recall does
+not measure).
+
+| combo | precision | recall | seed recovery | median GT |
+|---|---|---|---|---|
+| **`ear_mean_z + cum_heading_change`** | **0.946** | **0.967** | 0.698 | 38 |
+| `ear_mean_z` (height only) | 0.946 | 0.960 | 0.742 | 45 |
+| `ear_mean_z + angle_skip_xy` (previous best) | 0.912 | 0.806 | 0.584 | 32 |
+| `ear_mean_z + yaw_rate` | 0.889 | 0.816 | 0.617 | 37 |
+| `ear_mean_z + hip_asym` | 0.943 | 0.655 | 0.501 | 42 |
+| `ear_mean_z + angle_torsion_xy` | 0.958 | 0.687 | 0.521 | 38 |
+
+**`cum_heading_change` is the first turn feature in this entire investigation that does not cost
+anything.** Every previous addition to the height corridor traded 10–30 points of recall for a turn
+dimension (§8t–§8x: "adding a second feature to `ear_mean_z` never helps"). This one holds precision
+exactly (0.946) and *slightly improves* recall (0.960 → 0.967). Per-rat: R4 0.911/0.981,
+R5 0.969/0.971, R6 0.905/0.924 — all three clear 80/80, which `angle_skip_xy` never did
+(R4 0.786, R6 0.767 recall). Ground truth stays tight at 38 events/session against a ~22-event seed
+pool — no corridor explosion (§8v's degenerate ceiling is ~1,200).
+
+**Why this one and not `hip_asym`,** which is more reliable frame-by-frame (6.65 mm, and 94.8%
+conditional sign agreement)? Corridor matching scores a 30-frame *trajectory shape*, not a frame
+value. During a rear+turn, `cum_heading_change` traces a consistent monotone ramp; `hip_asym` and
+every posture angle take an essentially arbitrary value that varies rear to rear, so the corridor
+has to be wide enough to admit all of them and then rejects genuine events that fall outside.
+Frame-wise reliability was never sufficient — the feature also has to have a *stereotyped time
+course* within the behaviour. That is the design criterion §8s–§8aa were missing.
+
+### What this does and does not establish
+
+**Alignment between SLEAP and DANNCE: yes, strongly.** 94.6% / 96.7%, in all three rats, with a
+tight ground truth.
+
+**Detection of rear+turn events: good, not complete.** Seed recovery is 0.698 — the SLEAP detector
+fires on ~70% of the rear+turn events the seed detector identifies, slightly *below* height alone
+(0.742). The two modalities agree very well about the events they do find; roughly 30% of seeded
+rear+turn events are found by neither. That gap is the honest remaining limitation, and it is a
+different quantity from the precision/recall above — exactly the distinction §8x's numbers hid.
+
+**Not yet tested: the direction split.** §8z's separation test has not been rerun with
+`cum_heading_change`. Given 99.5% conditional sign agreement and a corridor whose shape differs
+between directions (a down-ramp vs an up-ramp, unlike height's identical corridors — §8z found the
+height-only direction detectors overlapped 81–83%), this is the obvious next step and the one most
+likely to finally deliver direction-specific reward.
+
+Scripts: `scripts/stage27_conditional_sign_agreement.py` → `stage27_conditional_sign.csv`,
+`stage27_conditional_sign_absolute.csv`; `scripts/stage28_rear_turn_matching.py` →
+`stage28_rear_turn_results.csv`, `stage28_rear_turn_summary.csv`.
+
+**Note on `heading_earhip`:** deliberately excluded from stage28 despite being the most precisely
+measured quantity in §8aa (8.17°). It is an *absolute world heading*, so a corridor built on it
+would encode "facing this compass direction" — baking an arena-orientation preference into the
+online rule, the exact class of spatial bias this investigation exists to characterise. Only its
+rotation-invariant derivative, `cum_heading_change`, is appropriate for matching.
+
+---
+
 ## 9. Caveats
 
 - **n = 3 rats.** Every cross-rat pattern is descriptive. The within-rat, within-behaviour designs in

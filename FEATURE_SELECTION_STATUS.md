@@ -10,7 +10,7 @@ investigation: `SPATIAL_CONFOUND_RESULTS.md` **§8l → §8y**, driven by `scrip
 Everything before §8l is the *other* question (does arena position bias the match rule) — related
 background, not this project.
 
-**Status as of the last run: 2026-10-16** (§8z-§8aa; everything before it 2026-09-14). All scripts, all
+**Status as of the last run: 2026-10-16** (§8z-§8ab; everything before it 2026-09-14). All scripts, all
 result CSVs, and all figures (F21–F37) are present on disk and consistent. Nothing needs re-running
 to recover the state.
 
@@ -22,7 +22,7 @@ to recover the state.
 |---|---|---|---|
 | **height** | `ear_mean_z` | mean Z of {EarL, EarR}, no snout | **validated.** 5.41 mm SLEAP-vs-DANNCE RMSE (best of 16). Alone: **93–94% precision / 96% recall** on rearing. Clears 80/80 in every rat. |
 | **crouch/stretch** | `dist_earmean_hipmean` | 3D dist, mean(EarL,EarR) ↔ mean(HipL,HipR) | **validated-ish.** 8.15 mm RMSE (best distance). With height: 93%/81–84%, but R6 recall dips to ~78%. |
-| **turn** | `cum_heading_change` | unwrapped heading change (HipMean→EarMean axis) over 30 frames | **best turn feature (§8aa).** 13.4° RMSE and 84.9% turn-sign agreement — ties the best angle on sign with 45% less magnitude error. Not yet run through the matching pipeline. |
+| **turn** | `cum_heading_change` | unwrapped heading change (HipMean→EarMean axis) over 30 frames | **validated (§8aa–§8ab).** 99.5% turn-sign agreement when the rat is actually turning (\|value\|≥45°). With `ear_mean_z` on `rear_turn`: 94.6%/96.7%, all 3 rats clear 80/80 — the first turn feature that costs no recall. |
 | turn (old best) | `angle_skip_xy` | signed XY angle, (SpineF−SpineL)→(Snout−SpineF) | **marginal but the only survivor.** With height: 91%/82%. R6 recall mid-70s. |
 | turn | `angle_torsion_xy`, `angle_body_head_xy` | hip-axis↔shoulder-axis; body-axis↔head | **ruled out.** 67% recall paired with height, and still 67% under a ground truth built from their own signal (§8v). Their self-consistent corridor swallows 600–830 events/session — not behaviorally selective. |
 
@@ -51,9 +51,11 @@ separation test shows:
   other-pool (0.55 vs 0.24), consistent in all 3 rats. Not vacuous, but weak.
 - **It recovers only ~55% of its own pool**, so bounds tuning faces a ~45-point gap, not the
   3–6 points F35 suggested.
-- **Ceiling: SLEAP and DANNCE agree on turn *sign* only ~85% of the time** — and §8aa confirms this
-  is a property of the measurement, not of one feature: across 14 direction-bearing features
-  spanning spine angles, signed distances and integrated heading, nothing clears ~85%.
+- **The ~85% turn-sign "ceiling" was an artifact (§8ab).** It pooled over frames where the rat is
+  barely turning and the sign is meaningless. Conditioned on an actual turn, `cum_heading_change`
+  reaches **99.5%** (\|value\|≥45°, 22% of frames, consistent in all 3 rats). The spine angles move
+  the opposite way — `angle_body_head_xy` falls to 62.9% at its largest values, because large
+  \|angle\| values are disproportionately tracking artifacts rather than real postures.
 - **§8aa added 7 new features.** `heading_earhip` measures body heading to **8.2°**, twice as
   precisely as any posture angle in the project. `cum_heading_change` is the new best turn feature.
   `yaw_rate` is the worst feature ever tested (66.6%) — integrating beats differentiating.
@@ -117,6 +119,8 @@ SPATIAL_CONFOUND_RESULTS.md §8s   scripts/stage21_feature_reliability.py   -> s
                             §8z   scripts/stage26_direction_separation.py  -> stage26_separation_{per_session,summary}.csv  (no figure yet)
                             §8aa  clirb/features.py (Families A+B) + stage21 rerun -> stage21_feature_reliability.csv (92 rows)
                                   scripts/_verify_turn_feature_signs.py  (synthetic sign-convention check)
+                            §8ab  scripts/stage27_conditional_sign_agreement.py -> stage27_conditional_sign{,_absolute}.csv
+                                  scripts/stage28_rear_turn_matching.py         -> stage28_rear_turn_{results,summary}.csv
                             §8p-r scripts/stage19_keypoint_mse.py, stage20_keypoint_mse_worldspace.py,
                                   stage20b_stratify_by_pipeline_version.py  (per-keypoint groundwork, F21-F26)
 ```
