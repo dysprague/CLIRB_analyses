@@ -16,9 +16,12 @@ multi_session_variability.ipynb.
                           learning-across-training analysis. Sessions with
                           fewer than 20 matches are absent, not padded.
 
+Sessions with fewer than --min_rewards online-triggered rewards are skipped
+entirely (excluded from both tables), not merely filtered downstream.
+
 Usage:
   .../envs/clirb_analysis/bin/python scripts/build_variability_summary.py \
-      --rats R4 R5 R6 --out data/variability_summary/per_rear.csv \
+      --rats R4 R5 R6 --min_rewards 10 --out data/variability_summary/per_rear.csv \
       --learning_out data/variability_summary/per_session_learning.csv
 
 Sessions are independent and mostly SMB-cache hits (session_cache.py), so a
@@ -110,12 +113,16 @@ def main():
     ap.add_argument("--template_like_bound_mult", type=float, default=1.25)
     ap.add_argument("--n_match", type=int, default=10)
     ap.add_argument("--min_matches", type=int, default=20)
+    ap.add_argument("--min_rewards", type=int, default=0,
+                    help="sessions with fewer online-triggered rewards than this are "
+                         "skipped entirely -- excluded from BOTH output tables, not "
+                         "just filtered downstream.")
     args = ap.parse_args()
 
     sessions = discover_qualifying_sessions(args.rats)
     print(f"{len(sessions)} qualifying sessions across {args.rats}")
 
-    rear_rows, learning_rows, failures = [], [], []
+    rear_rows, learning_rows, failures, skipped_low_reward = [], [], [], []
     t_start = time.time()
     for i, (rat, session) in enumerate(sessions):
         try:
@@ -123,6 +130,9 @@ def main():
                 rat, session, half_win_s=args.half_win_s, lookback=args.lookback,
                 reward_tol_s=args.reward_tol_s,
                 template_like_bound_mult=args.template_like_bound_mult)
+            if d["n_rewards"] < args.min_rewards:
+                skipped_low_reward.append((rat, session, d["n_rewards"]))
+                continue
             rear_rows.extend(rear_rows_from(d, rat, session))
             lrow = learning_row_from(d, rat, session, n_match=args.n_match,
                                      min_matches=args.min_matches)
@@ -135,7 +145,8 @@ def main():
         if (i + 1) % 10 == 0 or i == len(sessions) - 1:
             elapsed = time.time() - t_start
             print(f"  [{i + 1}/{len(sessions)}] {rat}/{session}: ok "
-                 f"({len(rear_rows)} rear-rows, {len(learning_rows)} learning-rows "
+                 f"({len(rear_rows)} rear-rows, {len(learning_rows)} learning-rows, "
+                 f"{len(skipped_low_reward)} skipped (<{args.min_rewards} rewards) "
                  f"so far, {elapsed:.0f}s elapsed)")
 
     df = pd.DataFrame(rear_rows)
@@ -150,6 +161,7 @@ def main():
     print(f"wrote {len(ldf)} sessions with >= {args.min_matches} matches "
          f"-> {args.learning_out}")
 
+    print(f"{len(skipped_low_reward)} sessions skipped for <{args.min_rewards} rewards")
     if failures:
         print(f"{len(failures)} sessions failed:")
         for rat, session, err in failures:
