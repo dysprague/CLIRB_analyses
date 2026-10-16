@@ -18,12 +18,22 @@ import data_io as dio  # noqa: E402
 from clirb import events as ev  # noqa: E402
 
 
-def replay_session(rat, session, flip_z=True, triang=None):
+def replay_session(rat, session, flip_z=True, triang=None, template=None):
     """Load a session and run the online rule over it.
+
+    `template` overrides which template the rule is matched against. Leave it
+    None to replay what the rig actually ran (the archived copy). Pass a
+    filename from the rat's templates/ folder (e.g. 'R6_template_5.npz') or an
+    already-loaded template dict to ask the counterfactual "what would this
+    session have looked like under a different template?". Anything other than
+    None means the replay no longer reflects what the rig did, so reconcile()
+    is expected to disagree.
 
     Returns dict:
       params        : OnlineParams from the session's campy_config.yaml
-      template      : the template npz the session ran with
+      template      : the template the rule was matched against
+      template_file : its filename, or None when a dict was passed in
+      template_is_session : True when replaying the session's own template
       pcs           : (T, n_pcs) online-equivalent projection
       is_real       : (T,) False on interpolated fills
       acq_frame     : (T,) camera acquisition times
@@ -32,7 +42,18 @@ def replay_session(rat, session, flip_z=True, triang=None):
       online_reward : camera frames where the rig actually delivered water
     """
     params = dio.load_session_config(rat, session)
-    template = dio.load_session_template(rat, session)
+    if template is None:
+        template_file = dio.session_template_name(rat, session)
+        template = dio.load_session_template(rat, session)
+        template_is_session = True
+    elif isinstance(template, str):
+        template_file = template
+        template = dio.load_template(rat, template)
+        template_is_session = (template_file ==
+                               dio.session_template_name(rat, session))
+    else:
+        template_file = None
+        template_is_session = False
     if triang is None:
         triang = dio.load_sleap_keys_3d(rat, session)
     n_frames = triang.shape[0]
@@ -64,7 +85,9 @@ def replay_session(rat, session, flip_z=True, triang=None):
         online_reward, logged_pcs = None, None
 
     return {'rat': rat, 'session': session, 'params': params,
-            'template': template, 'pcs': pcs, 'triang': triang,
+            'template': template, 'template_file': template_file,
+            'template_is_session': template_is_session,
+            'pcs': pcs, 'triang': triang,
             'is_real': align['is_real'], 'acq_frame': align['acq_frame'],
             'port_dist': port_dist, 'result': result,
             'online_reward': online_reward, 'logged_pcs': logged_pcs,
