@@ -2408,6 +2408,87 @@ rotation-invariant derivative, `cum_heading_change`, is appropriate for matching
 
 ---
 
+## 8ac. What `cum_heading_change` actually represents — reversals, and three caveats the trajectory plot exposed
+
+### What it is
+
+`cum_heading_change[t] = heading[t] − heading[t−30]`, a telescoping sum of wrapped per-frame
+increments of `heading_earhip`. It is **net signed rotation over the trailing 30 frames, not total
+angular path.** Two consequences:
+
+**A reversal cancels in the scalar.** Verified on synthetic poses: a rat turning +4°/frame for 15
+frames then −4°/frame for 15 frames travels a 116° path and ends at **+4°** — indistinguishable
+from standing still. A single-frame threshold rule cannot see it.
+
+**But the matched 30-frame trajectory can.** A sustained turn gives a monotone ramp (0 → 60 → 116);
+a mid-window reversal gives a tent (0 → 60 → 4). Same mid-window value, different shape, and the
+corridor scores the whole shape. Note the matched trajectory's effective temporal support is
+**59 frames, not 29** (`traj[j] = heading[e−29+j] − heading[e−59+j]`), so it reaches a full window
+before the nominal event — a boundary-blurring property worth knowing when interpreting matches.
+
+**Reversals are common, and they are exactly where the cross-modality disagreement lives.**
+Over 745 rear+turn events (12 sessions), |net| / total-path: median 0.696, and **26.7% of events are
+reversal-like (<0.5)** versus 30.6% strongly sustained (>0.8). Turn-sign agreement, split by that
+ratio:
+
+| event type | n | SLEAP-vs-DANNCE turn-sign agreement |
+|---|---|---|
+| sustained (ratio > 0.8) | 228 | **100.0%** |
+| reversal-like (ratio < 0.5) | 199 | 85.9% |
+| all rear+turn events | 745 | 96.1% |
+
+This explains the whole §8z→§8ab arc: agreement is *perfect* when the animal commits to a direction,
+and the residual disagreement is concentrated entirely in events where the direction is genuinely
+ill-defined. **Recommended fix: carry total path (`Σ|increments|`) alongside net.** The pair
+disambiguates — |net| ≈ path means sustained, |net| ≪ path means reversal — and lets a reward rule
+simply decline to assign a direction to reversals rather than guessing.
+
+### Three caveats from the R5 template-5 trajectory plot (F38)
+
+1,216 rear+turn events across the 23 R5 sessions running `R5_template_5.npz`.
+
+**(1) The direction imbalance is severe and real: 83–91% of rear+turn events are LEFTWARD in all
+three rats** (R5 1147 left / 69 right in this template epoch). Random windows are balanced
+(frac>0 = 0.51–0.57), so this is behaviour, not a sign-convention artifact. A balanced left/right
+reward paradigm may simply not have enough right-turn events to work with — this is a design
+constraint on the experiment, not something feature engineering can fix.
+
+**(2) "Turn direction" is not one quantity, and the two available definitions disagree.** Scoring
+the same events by torsion sign (§8x/stage26's definition) versus net-heading sign (stage29's):
+
+| rat | agreement |
+|---|---|
+| R5 | 0.876 |
+| R4 | 0.750 |
+| R6 | **0.232** (anti-correlated) |
+| pooled | 0.753 |
+
+Body torsion (shoulders twisted relative to hips) and whole-body rotation over time are genuinely
+different things, and for R6 they point opposite ways. **Which one is the behaviour to reward is a
+scientific decision, not something the data settles** — and §8x's direction split and §8ac's use
+different ones, so their left/right labels are not interchangeable.
+
+**(3) `cum_heading_change` is turn-specific for R4/R5 but NOT for R6.** Net heading change over the
+window, median: R5 rear+turn **+53.6°** vs plain rearing **+2.7°**; R4 **+83.8°** vs **−0.3°** —
+cleanly separated. R6: **+33.9°** vs **+33.1°** — indistinguishable. For R6 the feature is not
+telling turned rears from unturned ones at all, which is consistent with R6 being the weakest rat
+throughout this document and with its weakest-of-three stage28 numbers (0.905/0.924, seed recovery
+0.523). Any deployment should expect R6-specific failure.
+
+**What the plot confirms.** Direction separability (|median(left) − median(right)| / pooled IQR,
+averaged over the window): `cum_heading_change` **7.32**, versus `angle_torsion_xy` 1.44,
+`angle_body_head_xy` 1.27, `angle_skip_xy` 1.21, `hip_asym` 1.18, `angle_mid_xy` 0.79, and the
+components the rule actually uses — **PC1 0.71, PC0 0.33**. `cum_heading_change` separates turn
+direction roughly **5× better than any posture angle and 10–20× better than PC0/PC1**, which is the
+visual form of §8y's finding that PC2/PC3 are not a turnedness axis: neither are PC0/PC1. The PC0
+panel also shows both directions sitting squarely inside the template corridor — the production
+rule is, as expected, blind to turn direction by construction.
+
+Scripts: `scripts/stage29_r5_template5_trajectories.py` →
+`stage29_r5_template5_trajectories.csv`, figure F38.
+
+---
+
 ## 9. Caveats
 
 - **n = 3 rats.** Every cross-rat pattern is descriptive. The within-rat, within-behaviour designs in
