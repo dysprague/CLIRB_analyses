@@ -2489,6 +2489,93 @@ Scripts: `scripts/stage29_r5_template5_trajectories.py` →
 
 ---
 
+## 8ad. Why `cum_heading_change` is not a turn detector for R6 — and what that reveals about R4/R5
+
+§8ac found `cum_heading_change` separates turned from unturned rears for R4 (+83.8° vs −0.3°) and
+R5 (+53.6° vs +2.7°) but not R6 (+33.9° vs +33.1°). Four hypotheses, tested.
+
+### Rejected: left/right keypoint swaps
+
+`heading_earhip` uses `ear_mean` and `hip_mean` — averages of the L/R pairs, hence **invariant** to a
+left/right swap. `angle_torsion_xy` uses signed differences (`HipR−HipL`), hence a swap **flips its
+sign**. A side-confusing model in R6 would produce exactly the observed signature. Measuring the
+minority-sign fraction of cross(body-forward, lateral axis) — 0 means perfectly consistent labels:
+
+| rat | hip | shoulder | ear |
+|---|---|---|---|
+| R4 | 0.0117 | 0.0088 | 0.0244 |
+| R5 | 0.0157 | 0.0137 | 0.0431 |
+| **R6** | **0.0067** | **0.0056** | **0.0191** |
+
+**R6 has the cleanest handedness of the three.** Rejected.
+
+### Rejected: body size / lever arm
+
+Torsion is measured across hip and shoulder width, so a smaller animal would give a noisier signal.
+Median widths are near-identical: hip 39.2 / 40.1 / 39.3 mm and shoulder 31.6 / 31.4 / 32.6 mm for
+R4 / R5 / R6. Rejected.
+
+### Confirmed: R6 rotates ~32° during EVERY rear, and it is real behaviour
+
+The decisive test is whether DANNCE sees the same thing. It does:
+
+| rat | modality | rear+turn | plain rear | separation |
+|---|---|---|---|---|
+| R6 | SLEAP | +33.9° | +33.1° | **+0.9°** |
+| R6 | DANNCE | +32.2° | +31.2° | **+1.0°** |
+| R4 | SLEAP | +83.8° | −0.3° | +84.1° |
+| R4 | DANNCE | +76.5° | −3.3° | +79.8° |
+| R5 | SLEAP | +53.6° | +2.7° | +50.9° |
+| R5 | DANNCE | +69.1° | +5.4° | +63.7° |
+
+**Both modalities agree, so this is not a tracking artifact — R6 genuinely performs a stereotyped
+~32° leftward body rotation on essentially every rear.** That saturates the feature: the baseline is
+shifted up and "turned" rears add nothing on top of it. There is no contrast left to detect.
+
+### The compounding reason: for R6, the seed measures a different thing than the feature
+
+The `rear_turn` seed is defined on `|angle_torsion_xy|` ≥ 45° — shoulder-girdle twist relative to
+the hips. `cum_heading_change` measures whole-body rotation over time. §8ac found these two
+definitions of "turn direction" agree 0.876 (R5) and 0.750 (R4) but only **0.232 for R6** —
+anti-correlated. So R6's "turned" rears are turned in the *torsion* sense while the feature is
+looking at *rotation*, and for R6 those point opposite ways. This is a labelling mismatch, not a
+feature defect: the feature is being asked to detect events defined by a quantity it does not
+measure, and R6 is where the two quantities diverge most.
+
+### What this exposes about R4 and R5 — a caveat on the feature generally
+
+Correlating `cum_heading_change` with the COM's change in arena perimeter angle over the same window,
+across rears:
+
+| rat | corr(heading change, arena-angle travel) | arena travel, rear+turn vs plain |
+|---|---|---|
+| R4 | **+0.574** | +12.3° vs +4.4° (2.8×) |
+| R5 | **+0.721** | +14.9° vs +8.9° (1.7×) |
+| R6 | **+0.068** | +19.1° vs +19.7° (1.0×) |
+
+**For R4 and R5, heading change during rears is substantially coupled to travel around the curved
+wall** — their "turned" rears involve 1.7–2.8× more perimeter travel than their plain rears. The
+arena is a circle and the animals hug the wall (§1: 96% of rears at r > 250 mm), so a rat moving
+along it changes heading continuously without turning in place at all. **A meaningful part of what
+makes `cum_heading_change` look like a good turn detector in R4/R5 is locomotion-coupled rotation,
+not an in-place body turn.** R6 moves equally for turned and plain rears (19.1 vs 19.7) and shows no
+such correlation — it lacks precisely the confound that flatters the feature in the other two.
+
+This does not invalidate §8ab's matching numbers (cross-modality alignment is unaffected by what the
+feature means), but it changes the interpretation: if the behaviour to be rewarded is an *in-place*
+oriented rear rather than "rearing while travelling along the wall", `cum_heading_change` is
+partly measuring the wrong thing in exactly the two rats where it looks best. Separating the two
+requires regressing out arena-angle travel, or defining heading egocentrically to the wall tangent
+rather than to the world frame — neither yet done.
+
+*Note: an earlier run of this diagnostic double-converted `ARENA.theta`, which already returns
+degrees. Correlations are scale-invariant and unaffected; the arena-travel magnitudes above are the
+corrected ones.*
+
+Scripts: diagnostic only, not promoted to a stage script — the findings are recorded here.
+
+---
+
 ## 9. Caveats
 
 - **n = 3 rats.** Every cross-rat pattern is descriptive. The within-rat, within-behaviour designs in
