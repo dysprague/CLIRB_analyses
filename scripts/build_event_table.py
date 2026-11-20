@@ -27,9 +27,12 @@ def cached_sessions():
     return out
 
 
-def build():
+def build(sessions=None, out=OUT):
+    """Build the rear table. `sessions` defaults to every locally cached
+    session; pass an explicit list (and a different `out`) to build a
+    variant table without touching the canonical rears.csv."""
     rows = []
-    sessions = cached_sessions()
+    sessions = cached_sessions() if sessions is None else list(sessions)
     # chronological index per rat
     sidx = {}
     for rat in ['R4', 'R5', 'R6']:
@@ -118,9 +121,9 @@ def build():
                   f'{len(rears)} rears, {hit.sum()} matched')
 
     df = pd.DataFrame(rows)
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    df.to_csv(OUT, index=False)
-    print(f'\nwrote {OUT}: {len(df)} rears, {df.groupby(["rat","session"]).ngroups} sessions')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    df.to_csv(out, index=False)
+    print(f'\nwrote {out}: {len(df)} rears, {df.groupby(["rat","session"]).ngroups} sessions')
     print(df.groupby('rat').agg(n=('matched', 'size'), p=('matched', 'mean')).round(3))
     return df
 

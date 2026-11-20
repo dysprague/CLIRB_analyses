@@ -8,8 +8,13 @@ import matplotlib.pyplot as plt
 REPO = '/home/yutaka-sprague/CLIRB_analyses'
 sys.path.insert(0, REPO); os.chdir(REPO)
 
-RES = 'results/spatial_confound'
-FIG = 'results/figures/spatial_confound'
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument('--res', default='results/spatial_confound')
+_ap.add_argument('--fig', default='results/figures/spatial_confound')
+_args, _ = _ap.parse_known_args()
+RES = _args.res
+FIG = _args.fig
 os.makedirs(FIG, exist_ok=True)
 
 SURFACE = '#fcfcfb'; INK = '#0b0b0b'; INK2 = '#52514e'; MUTED = '#8a8880'; GRID = '#e4e3df'

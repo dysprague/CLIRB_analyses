@@ -362,4 +362,13 @@ def main():
 
 
 if __name__ == '__main__':
+    import argparse
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument('--out', default=OUT,
+                     help='output directory (default: the canonical '
+                          'results/spatial_confound, which overwrites §8m)')
+    _args = _ap.parse_args()
+    OUT = _args.out
+    os.makedirs(OUT, exist_ok=True)
+    print(f'writing to {OUT}')
     main()
